@@ -1,6 +1,7 @@
 # 🔍 Job Scraper
 
-Автоматизированный пайплайн для скрейпинга вакансий с **LinkedIn** и **Indeed** — фильтрация, ранжирование, экспорт в CSV.
+Автоматизированный многопоточный пайплайн для скрейпинга вакансий с **LinkedIn** и **Indeed**.
+Понимает запросы на **украинском**, **русском** и **английском** языках.
 
 ## ⚡ Быстрый старт (одна команда)
 
@@ -11,40 +12,60 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Запусти — всё подтянется автоматически:
 uv run job-scraper
 
-# Или классически через main.py:
+# Или через main.py:
 uv run python main.py
 ```
 
-> `uv run` сам создаст виртуальное окружение, установит зависимости и запустит пайплайн.
+> `uv run` сам создаст `.venv`, установит зависимости и запустит.
 > Никаких `pip install`, `venv`, `requirements.txt` — **одна команда**.
 
 ---
 
-## 📋 Что делает проект
+## 🧠 Естественный язык
 
-Трёхэтапный пайплайн:
+Пиши запрос как обычный текст — парсер сам вытащит параметры:
+
+```bash
+uv run python main.py "знайди мені 100 компаній які шукають 3D hard-surface artist. Шукай виключно remote позиції, шукай у країнах ЄС, США та Канади. Відфільтруй за зарплатнею. Максимум двох тиждневої давнини."
+```
+
+Что будет распознано:
 
 ```
-LinkedIn/Indeed → [Scrape] → [Filter] → [Rank] → CSV
+  Job title:     3D hard-surface artist
+  Results:       100
+  Remote only:   True
+  Locations:     Austria, Belgium, ..., Poland, ..., United States, Canada
+  Max age:       336h (14d)
+  Salary filter: True
 ```
 
-| Этап | Команда | Описание |
-|------|---------|----------|
-| **Scrape** | `uv run job-scraper scrape` | Собирает вакансии по городам × запросам × временным окнам |
-| **Filter** | `uv run job-scraper filter` | Жёсткая фильтрация: стажировки, опыт 2+ лет, спонсоры виз |
-| **Rank** | `uv run job-scraper rank` | Ранжирование по сходству с ранее поданными заявками |
-| **Всё сразу** | `uv run job-scraper` | Полный пайплайн (по умолчанию) |
+### Примеры запросов
+
+```bash
+# Украинский
+uv run python main.py "знайди 50 вакансій 3D artist, remote, ЄС, 2 тижні"
+
+# Русский
+uv run python main.py "найди 200 вакансий data analyst, удалённо, США и Канада, 7 дней"
+
+# English
+uv run python main.py "find 100 companies looking for product manager, remote, EU and USA"
+
+# Короткий запрос
+uv run python main.py -q "3D artist remote"
+```
 
 ---
 
-## 🚀 Установка и запуск
+## 🚀 Установка
 
 ### macOS / Linux
 
 ```bash
-# Установка uv (один раз):
+# Установка uv:
 curl -LsSf https://astral.sh/uv/install.sh | sh
-# или через Homebrew (macOS):
+# или:
 brew install uv
 
 # Перейди в проект и запусти:
@@ -55,11 +76,11 @@ uv run job-scraper
 ### Windows (PowerShell)
 
 ```powershell
-# Установка uv (один раз):
+# Установка uv:
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-# или через winget:
+# или:
 winget install --id=astral-sh.uv -e
-# или через pip:
+# или:
 pip install uv
 
 # Перейди в проект и запусти:
@@ -70,71 +91,74 @@ uv run job-scraper
 ### Windows (cmd)
 
 ```cmd
-REM Установка uv через pip:
 pip install uv
-
-REM Перейди в проект и запусти:
 cd Job_Scraper
 uv run job-scraper
 ```
 
-> **Важно:** На Windows может потребоваться перезапустить терминал после установки `uv`,
-> чтобы команда стала доступна в PATH.
+> **Windows:** перезапусти терминал после установки `uv`.
 
 ---
 
-## 🎯 Примеры использования
+## 🎯 Команды
+
+| Команда | Описание |
+|---------|----------|
+| `uv run job-scraper` | Полный пайплайн (scrape → filter → rank) |
+| `uv run job-scraper scrape` | Только скрейпинг |
+| `uv run job-scraper filter` | Только фильтрация (Stage 1) |
+| `uv run job-scraper rank` | Только ранжирование (Stage 2) |
+| `uv run job-scraper "текст"` | Естественный язык |
+| `uv run job-scraper -q "query"` | Короткий запрос |
+| `uv run job-scraper -w 5` | Указать число потоков |
+| `uv run job-scraper --version` | Версия |
+| `uv run job-scraper --help` | Справка |
+
+> Все команды также работают через `uv run python main.py ...`
+
+---
+
+## ⚡ Многопоточность
+
+По умолчанию скрейпер запускает **3 потока** параллельно.
+Можно изменить:
 
 ```bash
-# Полный пайплайн с настройками по умолчанию:
-uv run job-scraper
+# 5 потоков
+uv run job-scraper -w 5 "find 100 3D artist remote EU"
 
-# Только скрейпинг (без фильтрации):
-uv run job-scraper scrape
+# Однопоточный режим (безопаснее для LinkedIn)
+uv run job-scraper -w 1
 
-# Только фильтрация (если jobs.csv уже есть):
-uv run job-scraper filter
-
-# Только ранжирование:
-uv run job-scraper rank
-
-# Кастомный поисковый запрос:
-uv run job-scraper --query "data analyst Amsterdam"
-uv run job-scraper -q "python developer remote"
-
-# Посмотреть версию:
-uv run job-scraper --version
-
-# Справка:
-uv run job-scraper --help
+# Или в config.py:
+MAX_WORKERS: int = 3
 ```
 
 ---
 
 ## ⚙️ Конфигурация
 
-Все настройки — в файле `src/job_scraper/config.py`:
+Все настройки — `src/job_scraper/config.py`:
 
 | Параметр | Описание | По умолчанию |
 |----------|----------|-------------|
 | `SITES` | Сайты для скрейпинга | `["linkedin", "indeed"]` |
-| `PROVINCE_TO_BIGGEST_CITY` | Города для поиска | 5 городов Нидерландов |
-| `HOURS_WINDOWS` | Временные окна | `[48, 168, 336]` часов |
+| `MAX_WORKERS` | Число потоков | `3` |
+| `PROVINCE_TO_BIGGEST_CITY` | Города для поиска | 5 городов NL |
+| `HOURS_WINDOWS` | Временные окна | `[48, 168, 336]` |
 | `KEYWORD_SPLITS` | Поисковые запросы | 7 бизнес-запросов |
-| `RESULTS_WANTED_PER_RUN` | Макс. результатов за запрос | `3000` |
+| `RESULTS_WANTED_PER_RUN` | Макс. результатов | `3000` |
 | `SLEEP_BETWEEN_RUNS_SEC` | Пауза между запросами | `6` сек |
-| `SPONSOR_MATCH_THRESHOLD` | Порог для спонсоров виз | `0.70` |
+| `SPONSOR_MATCH_THRESHOLD` | Порог спонсоров виз | `0.70` |
 
 ### Дополнительные файлы (опционально)
 
-Положи в корень проекта `Job_Scraper/`:
-
 | Файл | Назначение |
 |------|-----------|
-| `visa_sponsors.csv` | Список компаний-спонсоров виз (1 колонка с названиями) |
-| `submitted_applications.csv` | Ранее поданные заявки (колонки: Company, Position, Description) |
+| `visa_sponsors.csv` | Компании-спонсоры виз (1 колонка) |
+| `submitted_applications.csv` | Поданные заявки (Company, Position, Description) |
 
-> Если файлы отсутствуют — фильтрация просто пропускается с предупреждением.
+> Если отсутствуют — этапы фильтрации пропускаются с предупреждением.
 
 ---
 
@@ -142,39 +166,36 @@ uv run job-scraper --help
 
 ```
 Job_Scraper/
-├── main.py                     # ← Точка входа (python main.py)
+├── main.py                     # ← Точка входа
 ├── pyproject.toml              # Зависимости и entry point
-├── uv.lock                     # Lock-файл (коммитится в git)
+├── uv.lock                     # Lock-файл
 ├── README.md
 ├── .gitignore
 │
-├── src/job_scraper/            # Исходный код (Python-пакет)
-│   ├── __init__.py             # Версия пакета
+├── src/job_scraper/
+│   ├── __init__.py             # Версия
 │   ├── __main__.py             # python -m job_scraper
 │   ├── cli.py                  # CLI (argparse)
-│   ├── config.py               # Все настройки и пути
-│   ├── scraper.py              # Этап 1: скрейпинг
-│   ├── filter_stage1.py        # Этап 2: жёсткая фильтрация
-│   └── filter_stage2.py        # Этап 3: ранжирование
+│   ├── config.py               # Настройки и пути
+│   ├── query_parser.py         # Парсер естественного языка
+│   ├── scraper.py              # Скрейпинг (многопоточный)
+│   ├── filter_stage1.py        # Фильтрация
+│   └── filter_stage2.py        # Ранжирование
 │
-├── visa_sponsors.csv           # (опционально) спонсоры виз
-├── submitted_applications.csv  # (опционально) поданные заявки
-│
-└── output/                     # Результаты (создаётся автоматически)
-    ├── runs_raw/               # Сырые данные по каждому запросу
-    ├── jobs.csv                # Объединённые вакансии
-    ├── jobs_stage1.csv         # После фильтрации
-    └── jobs_final.csv          # Финальный ранжированный результат
+└── output/                     # Результаты (авто)
+    ├── runs_raw/
+    ├── jobs.csv
+    ├── jobs_stage1.csv
+    └── jobs_final.csv
 ```
 
 ---
 
-## ❓ Частые проблемы
+## ❓ Проблемы
 
 | Проблема | Решение |
 |----------|---------|
-| `uv: command not found` | Установи uv (см. раздел «Установка»), перезапусти терминал |
-| `uv: The term 'uv' is not recognized` | Windows: перезапусти PowerShell после установки |
-| LinkedIn блокирует запросы | Увеличь `SLEEP_BETWEEN_RUNS_SEC` в `config.py` |
-| Пустой результат | Проверь ключевые слова в `KEYWORD_SPLITS` |
-| `visa_sponsors.csv not found` | Это предупреждение — спонсорский фильтр просто пропускается |
+| `uv: command not found` | Установи uv, перезапусти терминал |
+| LinkedIn блокирует | Уменьши потоки: `-w 1`, увеличь `SLEEP_BETWEEN_RUNS_SEC` |
+| Пустой результат | Проверь запрос или расширь `HOURS_WINDOWS` |
+| `visa_sponsors.csv not found` | Это OK — фильтр просто пропускается |
