@@ -32,6 +32,7 @@ class ParsedQuery:
     max_age_hours: int = 336  # 14 days default
     salary_filter: bool = False
     raw_query: str = ""
+    workers: int = 3
 
     def summary(self) -> str:
         lines = [
@@ -50,7 +51,7 @@ class ParsedQuery:
 EU_COUNTRIES = [
     "Poland", "Germany", "France", "Spain", "Sweden",
     "Netherlands", "Italy", "Portugal", "Austria", "Belgium",
-    "Czech Republic", "Denmark", "Finland", "Ireland",
+    "Czechia", "Denmark", "Finland", "Ireland",
     "Romania", "Bulgaria", "Croatia", "Greece", "Hungary",
     "Lithuania", "Latvia", "Estonia", "Slovakia", "Slovenia",
 ]

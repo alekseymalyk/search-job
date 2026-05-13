@@ -20,6 +20,7 @@ from flask import Flask, Response, jsonify, send_file
 from job_scraper import config
 from job_scraper.query_parser import parse_query
 from job_scraper.scraper import run_scraper
+from job_scraper.processing import process_jobs
 
 # Suppress Flask/Werkzeug access logs (GET /status etc.)
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
@@ -63,215 +64,279 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Job Scraper — Пошук вакансій</title>
+<title>Job Scraper — Minimal</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0a0a1a;--surface:rgba(255,255,255,0.04);--surface2:rgba(255,255,255,0.08);
-  --border:rgba(255,255,255,0.1);--text:#e4e4ef;--text2:#9d9db8;
-  --accent:#6c5ce7;--accent2:#a29bfe;--green:#00b894;--red:#ff6b6b;
-  --radius:16px;--font:'Inter',system-ui,sans-serif;
+  --bg:#000000;
+  --surface:#0a0a0a;
+  --surface-hover:#141414;
+  --border:#222;
+  --border-focus:#444;
+  --text:#ffffff;
+  --text-muted:#888888;
+  --accent:#ffffff;
+  --green:#34d399;
+  --red:#f87171;
+  --radius:8px;
+  --font:'JetBrains Mono', monospace;
+  --transition: 0.3s ease;
 }
-html{font-size:16px}
-body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;
-  display:flex;flex-direction:column;align-items:center;padding:2rem 1rem}
-h1{font-size:2rem;font-weight:700;background:linear-gradient(135deg,var(--accent2),var(--green));
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.25rem}
-.subtitle{color:var(--text2);font-size:.9rem;margin-bottom:2rem}
+html{font-size:14px; scroll-behavior: smooth;}
+body{
+  font-family:var(--font);background:var(--bg);color:var(--text);
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;
+  padding:3rem 1rem;
+}
+::selection { background: var(--text); color: var(--bg); }
 
-/* ── card ── */
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
-  padding:2rem;width:100%;max-width:720px;backdrop-filter:blur(12px);margin-bottom:1.5rem}
-.card h2{font-size:1.1rem;font-weight:600;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem}
+/* Layout & Typography */
+h1{font-size:1.5rem;font-weight:700;margin-bottom:0.5rem;letter-spacing:-0.05em;}
+.subtitle{color:var(--text-muted);font-size:0.9rem;margin-bottom:3rem;}
 
-/* ── search ── */
-textarea{width:100%;min-height:100px;background:var(--surface2);border:1px solid var(--border);
-  border-radius:12px;padding:1rem;color:var(--text);font-family:var(--font);font-size:.95rem;
-  resize:vertical;outline:none;transition:border-color .2s}
-textarea:focus{border-color:var(--accent)}
-textarea::placeholder{color:var(--text2)}
+.container { width: 100%; max-width: 800px; display: flex; flex-direction: column; gap: 2rem; }
 
-.settings{display:flex;gap:1rem;margin-top:1rem;flex-wrap:wrap;align-items:center}
-.settings label{color:var(--text2);font-size:.85rem;display:flex;align-items:center;gap:.4rem}
-.settings input[type=number]{width:60px;background:var(--surface2);border:1px solid var(--border);
-  border-radius:8px;padding:.4rem .5rem;color:var(--text);font-family:var(--font);outline:none;text-align:center}
-.settings select{background:var(--surface2);border:1px solid var(--border);border-radius:8px;
-  padding:.4rem .6rem;color:var(--text);font-family:var(--font);outline:none}
+/* Cards */
+.card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:2rem;
+  transition: transform var(--transition), border-color var(--transition), box-shadow var(--transition);
+  animation: fade-in 0.6s ease-out forwards;
+}
+.card:hover { border-color: var(--border-focus); }
+.card h2{font-size:1rem;font-weight:500;margin-bottom:1.5rem;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-muted);}
 
-.btn{display:inline-flex;align-items:center;gap:.5rem;padding:.75rem 2rem;border-radius:12px;
-  border:none;font-family:var(--font);font-size:1rem;font-weight:600;cursor:pointer;
-  transition:all .2s;margin-top:1.25rem}
-.btn-primary{background:linear-gradient(135deg,var(--accent),#8b7cf7);color:#fff;box-shadow:0 4px 20px rgba(108,92,231,.3)}
-.btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 24px rgba(108,92,231,.45)}
-.btn-primary:disabled{opacity:.5;cursor:not-allowed;transform:none}
-.btn-download{background:var(--green);color:#fff;padding:.6rem 1.5rem;font-size:.9rem;text-decoration:none;margin-top:1rem}
-.btn-download:hover{opacity:.9}
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
-/* ── presets ── */
-.presets{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.75rem}
-.preset{background:var(--surface2);border:1px solid var(--border);border-radius:10px;
-  padding:.4rem .8rem;font-size:.8rem;color:var(--text2);cursor:pointer;transition:all .15s}
-.preset:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+/* Forms & Inputs */
+textarea{
+  width:100%;min-height:120px;background:var(--bg);border:1px solid var(--border);
+  border-radius:var(--radius);padding:1rem;color:var(--text);
+  font-family:var(--font);font-size:0.9rem;line-height:1.5;
+  resize:vertical;outline:none;transition: border-color var(--transition), box-shadow var(--transition);
+}
+textarea:focus{border-color:var(--text);box-shadow: 0 0 0 1px var(--text);}
+textarea::placeholder{color:var(--text-muted);}
 
-/* ── progress ── */
-.progress-bar{display:none;margin-top:1.25rem}
-.progress-bar.active{display:block}
-.progress-track{height:4px;background:var(--surface2);border-radius:4px;overflow:hidden}
-.progress-fill{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--green));
-  border-radius:4px;transition:width .3s}
-.progress-text{font-size:.82rem;color:var(--text2);margin-top:.5rem}
+.settings{display:flex;gap:1.5rem;margin-top:1.5rem;align-items:center;font-size:0.9rem;}
+.settings label{display:flex;align-items:center;gap:0.5rem;color:var(--text-muted);}
+.settings input[type=number]{
+  width:60px;background:var(--bg);border:1px solid var(--border);
+  border-radius:4px;padding:0.4rem;color:var(--text);font-family:var(--font);
+  outline:none;text-align:center;transition: border-color var(--transition);
+}
+.settings input[type=number]:focus { border-color: var(--text); }
 
-.spinner{display:inline-block;width:18px;height:18px;border:2px solid rgba(255,255,255,.2);
-  border-top-color:var(--accent2);border-radius:50%;animation:spin .6s linear infinite}
+/* Buttons */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:0.5rem;
+  padding:0.8rem 1.5rem;border-radius:var(--radius);border:1px solid var(--border);
+  font-family:var(--font);font-size:0.9rem;font-weight:500;cursor:pointer;
+  background:var(--bg);color:var(--text);transition: all var(--transition);
+  margin-top:1.5rem; text-transform: uppercase; letter-spacing: 0.05em;
+}
+.btn:hover:not(:disabled){ background:var(--text); color:var(--bg); }
+.btn:disabled{opacity:0.5;cursor:not-allowed;}
+.btn-primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+.btn-primary:hover:not(:disabled) { background: var(--bg); color: var(--text); }
+.btn-download{
+  background:transparent;color:var(--green);border-color:var(--green);
+  text-decoration:none;margin-top:0;
+}
+.btn-download:hover{background:var(--green);color:var(--bg);}
+
+/* Presets */
+.presets{display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:1rem;}
+.preset{
+  background:transparent;border:1px solid var(--border);border-radius:20px;
+  padding:0.3rem 0.8rem;font-size:0.8rem;color:var(--text-muted);
+  cursor:pointer;transition:all 0.2s;
+}
+.preset:hover{border-color:var(--text);color:var(--text);}
+
+/* Progress & Loading */
+.progress-container{display:none;}
+.progress-container.active{display:block; animation: fade-in 0.4s ease-out;}
+.progress-track{
+  height:2px;background:var(--border);border-radius:2px;
+  overflow:hidden;margin:1rem 0;position:relative;
+}
+.progress-fill{
+  height:100%;width:0%;background:var(--text);
+  transition:width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.progress-text{font-size:0.85rem;color:var(--text-muted);display:flex;justify-content:space-between;}
+
+.spinner{
+  display:inline-block;width:14px;height:14px;
+  border:2px solid var(--border);border-top-color:var(--text);
+  border-radius:50%;animation:spin 0.8s linear infinite;
+}
+.spinner.inverse { border-top-color: var(--bg); border-color: rgba(0,0,0,0.2); }
 @keyframes spin{to{transform:rotate(360deg)}}
 
-/* ── log ── */
-.log{background:var(--bg);border:1px solid var(--border);border-radius:12px;
-  padding:.75rem 1rem;max-height:180px;overflow-y:auto;font-size:.78rem;
-  font-family:'SF Mono','Fira Code',monospace;color:var(--text2);margin-top:.75rem;
-  display:none;line-height:1.6}
-.log.active{display:block}
-.log .ok{color:var(--green)}.log .err{color:var(--red)}.log .info{color:var(--accent2)}
+/* Terminal Log */
+.log{
+  background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+  padding:1rem;max-height:200px;overflow-y:auto;font-size:0.8rem;
+  color:var(--text-muted);margin-top:1.5rem;line-height:1.6;
+  display:none;
+}
+.log.active{display:block; animation: fade-in 0.4s ease-out;}
+.log .ok{color:var(--green);}
+.log .err{color:var(--red);}
+.log .info{color:var(--text);}
+.log-line { border-left: 2px solid transparent; padding-left: 0.5rem; margin-bottom: 0.2rem; }
+.log-line:hover { background: var(--surface-hover); border-left-color: var(--border-focus); }
 
-/* ── results ── */
-.results{display:none}
-.results.active{display:block}
-.results-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.75rem}
-.badge{background:var(--green);color:#fff;padding:.3rem .75rem;border-radius:20px;font-size:.82rem;font-weight:600}
-table{width:100%;border-collapse:collapse;font-size:.85rem}
-thead{position:sticky;top:0}
-th{background:var(--surface2);color:var(--accent2);padding:.6rem .75rem;text-align:left;
-  font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.5px}
-td{padding:.6rem .75rem;border-bottom:1px solid var(--border);vertical-align:top}
-tr:hover td{background:var(--surface2)}
-td a{color:var(--accent2);text-decoration:none}
-td a:hover{text-decoration:underline}
-.table-wrap{max-height:500px;overflow:auto;border-radius:12px;border:1px solid var(--border)}
-.desc-cell{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Results Table */
+.results{display:none;}
+.results.active{display:block; animation: fade-in 0.6s ease-out;}
+.results-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem;}
+.badge{background:var(--surface-hover);border:1px solid var(--border);padding:0.2rem 0.6rem;border-radius:4px;font-size:0.8rem;font-weight:500;}
 
-/* ── examples ── */
-.examples{margin-top:1rem}
-.examples summary{color:var(--text2);font-size:.85rem;cursor:pointer;user-select:none}
-.examples-list{margin-top:.5rem;display:flex;flex-direction:column;gap:.4rem}
-.example{font-size:.8rem;color:var(--text2);padding:.4rem .6rem;background:var(--surface2);
-  border-radius:8px;cursor:pointer;transition:background .15s;border:1px solid transparent}
-.example:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+.table-wrap{overflow-x:auto; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg);}
+table{width:100%;border-collapse:collapse;font-size:0.85rem;}
+th{
+  background:var(--surface);color:var(--text-muted);padding:1rem;
+  text-align:left;font-weight:500;text-transform:uppercase;letter-spacing:0.05em;
+  border-bottom:1px solid var(--border);
+}
+td{padding:1rem;border-bottom:1px solid var(--border);vertical-align:top; color:var(--text);}
+tr:last-child td { border-bottom: none; }
+tr:hover td{background:var(--surface-hover);}
+td a{color:var(--text);text-decoration:underline;text-underline-offset:4px;}
+td a:hover{color:var(--text-muted);}
+.desc-cell{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);}
 
-/* ── responsive ── */
+/* Parsed Data */
+.parsed-card { display: none; }
+.parsed-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 1rem; }
+.parsed-item { background: var(--bg); padding: 1rem; border-radius: var(--radius); border: 1px solid var(--border); }
+.parsed-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 0.5rem; }
+.parsed-value { font-size: 0.9rem; font-weight: 500; }
+
+/* Custom Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-focus); }
+
 @media(max-width:600px){
-  body{padding:1rem .5rem}
-  .card{padding:1.25rem}
-  h1{font-size:1.5rem}
-  .settings{flex-direction:column;align-items:flex-start}
+  body{padding:1.5rem 0.5rem;}
+  .card{padding:1.5rem;}
+  .settings{flex-direction:column;align-items:flex-start;}
 }
 </style>
 </head>
 <body>
 
-<h1>🔍 Job Scraper</h1>
-<p class="subtitle">Пошук вакансій на LinkedIn та Indeed — просто опишіть, що шукаєте</p>
+<div class="container">
+  <header>
+    <h1>> Job Scraper</h1>
+    <p class="subtitle">Automated recruitment targeting. Defined by natural language.</p>
+  </header>
 
-<!-- SEARCH CARD -->
-<div class="card">
-  <h2>📝 Ваш запит</h2>
-  <textarea id="query" placeholder="Опишіть, які вакансії шукаєте. Можна українською, російською або англійською.&#10;&#10;Наприклад: знайди мені 100 компаній які шукають 3D hard-surface artist. Шукай remote позиції у ЄС та США."></textarea>
+  <!-- SEARCH CARD -->
+  <div class="card">
+    <h2>01 // Query Setup</h2>
+    <textarea id="query" placeholder="Describe the roles you are looking for.&#10;&#10;e.g. 'find 50 companies hiring 3D artists, remote in EU/US, max 2 weeks old.'"></textarea>
 
-  <div class="presets">
-    <span class="preset" onclick="setPreset('3D artist')">🎨 3D Artist</span>
-    <span class="preset" onclick="setPreset('data analyst')">📊 Data Analyst</span>
-    <span class="preset" onclick="setPreset('product manager')">📋 Product Manager</span>
-    <span class="preset" onclick="setPreset('python developer')">🐍 Python Dev</span>
-    <span class="preset" onclick="setPreset('UX designer')">✏️ UX Designer</span>
-    <span class="preset" onclick="setPreset('marketing manager')">📣 Marketing</span>
-  </div>
-
-  <div class="settings">
-    <label>⚡ Потоків: <input type="number" id="workers" value="3" min="1" max="10"></label>
-  </div>
-
-  <button class="btn btn-primary" id="searchBtn" onclick="startSearch()">
-    🚀 Почати пошук
-  </button>
-
-  <details class="examples">
-    <summary>📖 Приклади запитів (натисніть, щоб розгорнути)</summary>
-    <div class="examples-list">
-      <div class="example" onclick="useExample(this)">знайди мені 100 компаній які шукають 3D hard-surface artist. Шукай remote позиції у ЄС, США та Канаді. Максимум 2 тижні.</div>
-      <div class="example" onclick="useExample(this)">найди 50 вакансий data analyst, удалённо, США и Канада, за последние 7 дней</div>
-      <div class="example" onclick="useExample(this)">find 200 companies looking for product manager, remote, EU and USA, last 2 weeks</div>
-      <div class="example" onclick="useExample(this)">знайди 30 вакансій python developer, remote, Нідерланди та Німеччина</div>
+    <div class="presets">
+      <span class="preset" onclick="setPreset('3D artist')">3D Artist</span>
+      <span class="preset" onclick="setPreset('data analyst')">Data Analyst</span>
+      <span class="preset" onclick="setPreset('product manager')">Product Manager</span>
+      <span class="preset" onclick="setPreset('python developer')">Python Dev</span>
+      <span class="preset" onclick="setPreset('UX designer')">UX Designer</span>
     </div>
-  </details>
-</div>
 
-<!-- PROGRESS CARD -->
-<div class="card" id="progressCard" style="display:none">
-  <h2><span class="spinner"></span> Пошук вакансій...</h2>
-  <div class="progress-bar active">
+    <div class="settings">
+      <label>Threads: <input type="number" id="workers" value="3" min="1" max="10"></label>
+    </div>
+
+    <button class="btn btn-primary" id="searchBtn" onclick="startSearch()">
+      Initialize Search
+    </button>
+  </div>
+
+  <!-- PARSED QUERY CARD -->
+  <div class="card parsed-card" id="parsedCard">
+    <h2>02 // Parameter Extraction</h2>
+    <div class="parsed-grid" id="parsedInfo"></div>
+  </div>
+
+  <!-- PROGRESS CARD -->
+  <div class="card progress-container" id="progressCard">
+    <h2>03 // Execution Status</h2>
     <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
-    <div class="progress-text" id="progressText">Підготовка...</div>
+    <div class="progress-text">
+      <span id="progressLabel">Connecting...</span>
+      <span id="progressCount">0%</span>
+    </div>
+    <div class="log" id="logBox"></div>
   </div>
-  <div class="log active" id="logBox"></div>
-</div>
 
-<!-- RESULTS CARD -->
-<div class="card results" id="resultsCard">
-  <div class="results-header">
-    <h2>✅ Результати</h2>
-    <span class="badge" id="resultCount">0 вакансій</span>
+  <!-- RESULTS CARD -->
+  <div class="card results" id="resultsCard">
+    <div class="results-header">
+      <h2>04 // Acquired Targets</h2>
+      <div style="display:flex; gap:1rem; align-items:center;">
+        <span class="badge" id="resultCount">0 matches</span>
+        <a class="btn btn-download" href="/download" id="downloadBtn">Export CSV</a>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Company</th><th>Role</th><th>Location</th><th>Context</th><th>Link</th></tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+    </div>
   </div>
-  <a class="btn btn-download" href="/download" id="downloadBtn">📥 Завантажити CSV</a>
-  <div class="table-wrap" style="margin-top:1rem">
-    <table>
-      <thead>
-        <tr><th>Компанія</th><th>Позиція</th><th>Локація</th><th>Опис</th><th>Посилання</th></tr>
-      </thead>
-      <tbody id="resultsBody"></tbody>
-    </table>
-  </div>
-</div>
-
-<!-- PARSED QUERY CARD -->
-<div class="card" id="parsedCard" style="display:none">
-  <h2>🧠 Розпізнані параметри</h2>
-  <div id="parsedInfo" style="font-size:.85rem;color:var(--text2);line-height:1.8"></div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
 
 function setPreset(job) {
-  $('query').value = `знайди мені 50 компаній які шукають ${job}. Шукай remote позиції у ЄС, США та Канаді. Максимум 2 тижні.`;
-  $('query').focus();
-}
-
-function useExample(el) {
-  $('query').value = el.textContent;
-  $('query').focus();
+  const q = $('query');
+  q.value = `find 50 companies hiring ${job}, remote in EU, US, Canada. last 2 weeks.`;
+  q.focus();
 }
 
 let pollTimer = null;
 
 async function startSearch() {
   const query = $('query').value.trim();
-  if (!query) { alert('Будь ласка, введіть запит'); return; }
+  if (!query) return;
 
   const workers = parseInt($('workers').value) || 3;
 
-  // UI state
-  $('searchBtn').disabled = true;
-  $('searchBtn').innerHTML = '<span class="spinner"></span> Шукаю...';
-  $('progressCard').style.display = 'block';
+  // UI state transition
+  const btn = $('searchBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner inverse"></span> Processing...';
+  
+  $('progressCard').classList.add('active');
   $('resultsCard').classList.remove('active');
   $('parsedCard').style.display = 'none';
   $('logBox').innerHTML = '';
+  $('logBox').classList.remove('active');
   $('progressFill').style.width = '0%';
-  $('progressText').textContent = 'Надсилаю запит...';
+  $('progressLabel').textContent = 'Authenticating request...';
+  $('progressCount').textContent = '0 / ?';
+
+  // Smooth scroll
+  $('progressCard').scrollIntoView({behavior: 'smooth', block: 'nearest'});
 
   try {
-    // Start the search
     const res = await fetch('/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -283,11 +348,11 @@ async function startSearch() {
       showParsed(data.parsed);
     }
 
-    // Start polling
-    $('progressText').textContent = 'Скрейпінг запущено...';
-    pollTimer = setInterval(pollStatus, 1000);
+    $('progressLabel').textContent = 'Initiating web drivers...';
+    $('logBox').classList.add('active');
+    pollTimer = setInterval(pollStatus, 800);
   } catch (e) {
-    $('progressText').textContent = 'Помилка: ' + e.message;
+    $('progressLabel').textContent = 'ERR: ' + e.message;
     resetBtn();
   }
 }
@@ -295,12 +360,11 @@ async function startSearch() {
 function showParsed(p) {
   $('parsedCard').style.display = 'block';
   $('parsedInfo').innerHTML = `
-    <div>🎯 <strong>Посада:</strong> ${p.job_title || '(за замовчуванням)'}</div>
-    <div>📊 <strong>Кількість:</strong> ${p.count}</div>
-    <div>🏠 <strong>Remote:</strong> ${p.remote ? '✅ Так' : '❌ Ні'}</div>
-    <div>🌍 <strong>Країни:</strong> ${p.locations.length ? p.locations.join(', ') : 'за замовчуванням'}</div>
-    <div>📅 <strong>Давність:</strong> ${p.max_age_hours}г (${Math.round(p.max_age_hours/24)}д)</div>
-    <div>💰 <strong>Фільтр зарплати:</strong> ${p.salary_filter ? '✅ Так' : '❌ Ні'}</div>
+    <div class="parsed-item"><div class="parsed-label">Role</div><div class="parsed-value">${esc(p.job_title || 'Any')}</div></div>
+    <div class="parsed-item"><div class="parsed-label">Target Count</div><div class="parsed-value">${p.count}</div></div>
+    <div class="parsed-item"><div class="parsed-label">Remote</div><div class="parsed-value">${p.remote ? 'Required' : 'Any'}</div></div>
+    <div class="parsed-item"><div class="parsed-label">Region</div><div class="parsed-value">${p.locations.length ? esc(p.locations.join(', ')) : 'Global'}</div></div>
+    <div class="parsed-item"><div class="parsed-label">Max Age</div><div class="parsed-value">${Math.round(p.max_age_hours/24)} days</div></div>
   `;
 }
 
@@ -310,31 +374,41 @@ async function pollStatus() {
     const data = await res.json();
     const log = $('logBox');
 
-    // Update log
     if (data.progress && data.progress.length) {
+      // Only append new lines for better performance and animation if wanted, but full redraw is fine for small logs
       log.innerHTML = data.progress.map(m => {
-        if (m.includes('✓')) return `<div class="ok">${esc(m)}</div>`;
-        if (m.includes('✗') || m.includes('fail')) return `<div class="err">${esc(m)}</div>`;
-        return `<div class="info">${esc(m)}</div>`;
+        let cls = 'info';
+        if (m.includes('✓')) cls = 'ok';
+        else if (m.includes('✗') || m.toLowerCase().includes('fail')) cls = 'err';
+        return `<div class="log-line ${cls}">${esc(m)}</div>`;
       }).join('');
       log.scrollTop = log.scrollHeight;
     }
 
-    // Update progress bar (estimate)
     const total = data.progress.filter(m => m.includes('✓') || m.includes('✗')).length;
-    const pct = Math.min(95, total * 4);
-    $('progressFill').style.width = pct + '%';
-    $('progressText').textContent = `Оброблено: ${total} запитів...`;
+    // Attempt to guess progress based on total logs vs target count. Not perfectly accurate but looks active.
+    let expected = 20; // arbitrary base
+    let countNode = $('parsedInfo').textContent.match(/Target Count\n\s*(\d+)/);
+    if (countNode && countNode[1]) expected = parseInt(countNode[1]);
+    
+    let pct = Math.min(98, Math.max(5, (total / expected) * 100));
+    if (data.status === 'running') {
+       $('progressFill').style.width = pct + '%';
+       $('progressLabel').textContent = 'Extraction in progress...';
+       $('progressCount').textContent = `${total} ops`;
+    }
 
     if (data.status === 'done') {
       clearInterval(pollTimer);
       $('progressFill').style.width = '100%';
-      $('progressText').textContent = `Готово! Знайдено ${data.result_count} вакансій.`;
+      $('progressLabel').textContent = 'Extraction complete.';
+      $('progressCount').textContent = `Found ${data.result_count}`;
       if (data.result_count > 0) loadResults();
       resetBtn();
     } else if (data.status === 'error') {
       clearInterval(pollTimer);
-      $('progressText').textContent = '❌ Помилка: ' + data.error;
+      $('progressFill').style.background = 'var(--red)';
+      $('progressLabel').textContent = 'Process terminated.';
       resetBtn();
     }
   } catch(e) {}
@@ -346,24 +420,28 @@ async function loadResults() {
     const jobs = await res.json();
     const tbody = $('resultsBody');
 
-    $('resultCount').textContent = jobs.length + ' вакансій';
+    $('resultCount').textContent = jobs.length + ' targets found';
     tbody.innerHTML = jobs.map(j => `
       <tr>
         <td>${esc(j.company)}</td>
-        <td><strong>${esc(j.position)}</strong></td>
-        <td>${esc(j.location)}</td>
-        <td class="desc-cell" title="${esc(j.description)}">${esc(j.description?.substring(0, 120) || '')}</td>
-        <td>${j.url ? `<a href="${esc(j.url)}" target="_blank">Відкрити ↗</a>` : '—'}</td>
+        <td style="font-weight:500;">${esc(j.position)}</td>
+        <td style="color:var(--text-muted);">${esc(j.location)}</td>
+        <td class="desc-cell" title="${esc(j.description)}">${esc(j.description?.substring(0, 80) || '')}...</td>
+        <td>${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">Link</a>` : '—'}</td>
       </tr>
     `).join('');
 
     $('resultsCard').classList.add('active');
+    setTimeout(() => {
+        $('resultsCard').scrollIntoView({behavior: 'smooth', block: 'start'});
+    }, 100);
   } catch(e) {}
 }
 
 function resetBtn() {
-  $('searchBtn').disabled = false;
-  $('searchBtn').innerHTML = '🚀 Почати пошук';
+  const btn = $('searchBtn');
+  btn.disabled = false;
+  btn.innerHTML = 'Initialize Search';
 }
 
 function esc(s) {
@@ -391,7 +469,7 @@ def search():
     workers = data.get("workers", 3)
 
     parsed = parse_query(query_text)
-    config.MAX_WORKERS = max(1, min(10, workers))
+    parsed.workers = max(1, min(10, workers))
 
     _reset_state()
     _set_status("running")
@@ -427,7 +505,7 @@ def status():
 def results():
     import pandas as pd
 
-    csv_path = config.JOBS_CSV
+    csv_path = config.FINAL_CSV
     if not csv_path.exists():
         return jsonify([])
 
@@ -443,7 +521,7 @@ def results():
 
 @app.route("/download")
 def download():
-    csv_path = config.JOBS_CSV
+    csv_path = config.FINAL_CSV
     if not csv_path.exists():
         return "No results yet", 404
     return send_file(str(csv_path), as_attachment=True, download_name="jobs.csv")
@@ -462,18 +540,13 @@ def _run_scraper_background(parsed):
     builtins.print = patched_print
 
     try:
-        run_scraper(
-            locations=parsed.locations or None,
-            hours_windows=[parsed.max_age_hours] if parsed.max_age_hours else None,
-            keywords=[parsed.job_title] if parsed.job_title else None,
-            is_remote=parsed.remote,
-            results_wanted=parsed.count,
-        )
+        run_scraper(parsed)
+        process_jobs(parsed)
 
         # Count results
         import pandas as pd
-        if config.JOBS_CSV.exists():
-            count = len(pd.read_csv(config.JOBS_CSV))
+        if config.FINAL_CSV.exists():
+            count = len(pd.read_csv(config.FINAL_CSV))
         else:
             count = 0
 

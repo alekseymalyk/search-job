@@ -9,16 +9,17 @@ import logging
 import os
 import re
 import time
+import random
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Optional
 
 import pandas as pd
 from jobspy import scrape_jobs
 
 from job_scraper import config
+from job_scraper.query_parser import ParsedQuery
 
 # ── Suppress noisy third-party output ──
 logging.getLogger("jobspy").setLevel(logging.WARNING)
@@ -35,6 +36,22 @@ _ANSI_DIM = "\033[90m"
 _ANSI_BOLD = "\033[1m"
 _ANSI_RESET = "\033[0m"
 
+# ── Default settings for generic scans ──
+DEFAULT_LOCATIONS = [
+    "Eindhoven, Netherlands", "Amsterdam, Netherlands", "Enschede, Netherlands",
+    "Rotterdam, Netherlands", "Utrecht, Netherlands"
+]
+DEFAULT_HOURS_WINDOWS = [48, 168, 336]
+DEFAULT_KEYWORDS = [
+    "finance OR fintech OR payments OR banking OR treasury OR pricing OR revenue",
+    "operations OR ops OR business operations OR process OR workflow OR execution",
+    "sales OR commercial OR account OR customer OR client OR partnerships OR growth",
+    "marketing OR brand OR campaign OR go-to-market OR gtm OR acquisition",
+    "supply chain OR logistics OR procurement OR sourcing OR demand planning",
+    "business OR strategy OR planning OR insights OR analytics",
+    "product OR implementation OR onboarding OR rollout OR delivery",
+]
+
 
 def _tprint(*args, **kwargs):
     """Thread-safe print."""
@@ -42,7 +59,7 @@ def _tprint(*args, **kwargs):
         print(*args, **kwargs)
 
 
-# ───────────────────────── helpers ─────────────────────────
+# ───────────────────────── HELPERS ─────────────────────────
 
 def slugify(s: str) -> str:
     s = s.strip().lower()
@@ -128,17 +145,16 @@ def dedupe_jobs(df: pd.DataFrame) -> pd.DataFrame:
 
 def expand_keywords(title: str) -> list[str]:
     """Generate search keyword variations from a job title for better coverage."""
+    if not title:
+        return []
+        
     keywords = [title]
-
-    # Split compound titles: "3D hard-surface artist" → also try "3D artist"
     words = title.split()
     if len(words) >= 3:
-        # Try first + last word
         short = f"{words[0]} {words[-1]}"
         if short.lower() != title.lower():
             keywords.append(short)
 
-    # Common synonyms for broader matching
     synonyms = {
         "artist": ["designer", "modeler"],
         "developer": ["engineer", "programmer"],
@@ -155,7 +171,7 @@ def expand_keywords(title: str) -> list[str]:
     return keywords
 
 
-# ───────────────────────── single run ─────────────────────────
+# ───────────────────────── SINGLE RUN ─────────────────────────
 
 def scrape_one_run(
     search_term: str,
@@ -163,26 +179,49 @@ def scrape_one_run(
     location: str,
     run_tag: str,
     is_remote: bool = False,
-    results_wanted: int | None = None,
+    results_wanted: int = 100,
 ) -> pd.DataFrame:
     run_start = time.time()
+
+    loc_lower = location.lower().strip()
+    if loc_lower in ("czech republic", "czechia"):
+        country_indeed = "czechia"
+    elif loc_lower in config.VALID_JOBSPY_COUNTRIES:
+        country_indeed = loc_lower
+    else:
+        country_indeed = config.COUNTRY_INDEED
 
     kwargs = dict(
         site_name=config.SITES,
         search_term=search_term,
         location=location,
         hours_old=hours_old,
-        results_wanted=results_wanted or config.RESULTS_WANTED_PER_RUN,
+        results_wanted=results_wanted,
         linkedin_fetch_description=True,
+        country_indeed=country_indeed,
         verbose=0,
     )
     if is_remote:
         kwargs["is_remote"] = True
-    if not is_remote:
-        kwargs["country_indeed"] = config.COUNTRY_INDEED
 
-    df = scrape_jobs(**kwargs)
-    run_duration = time.time() - run_start
+    max_retries = 3
+    df = None
+    last_err = None
+
+    for attempt in range(max_retries):
+        try:
+            df = scrape_jobs(**kwargs)
+            break
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            if "max retries exceeded" in err_str or "nodename nor servname" in err_str or "429" in err_str or "invalid country" in err_str:
+                if "invalid country" in err_str:
+                    kwargs["country_indeed"] = "worldwide"
+                if attempt < max_retries - 1:
+                    time.sleep(random.uniform(2, 5) * (attempt + 1))
+                    continue
+            raise last_err
 
     if df is None or len(df) == 0:
         return pd.DataFrame()
@@ -201,22 +240,23 @@ def scrape_one_run(
     return df
 
 
-# ───────────────────────── orchestrator ─────────────────────────
+# ───────────────────────── ORCHESTRATOR ─────────────────────────
 
-def _build_run_plan(
-    locations: list[str] | None = None,
-    hours_windows: list[int] | None = None,
-    keywords: list[str] | None = None,
-    is_remote: bool = False,
-    results_wanted: int | None = None,
-) -> list[dict]:
-    """Build a list of scraping runs."""
-    locs = locations or [
-        f"{city}, {config.COUNTRY_INDEED}"
-        for city in config.PROVINCE_TO_BIGGEST_CITY.values()
-    ]
-    hours_list = hours_windows or config.HOURS_WINDOWS
-    kw_list = keywords or config.KEYWORD_SPLITS
+def _build_run_plan(query: ParsedQuery) -> list[dict]:
+    """Build a list of scraping runs based on the parsed query."""
+    locs = query.locations if query.locations else DEFAULT_LOCATIONS
+    hours_list = [query.max_age_hours] if query.max_age_hours else DEFAULT_HOURS_WINDOWS
+    
+    if query.job_title:
+        expanded = expand_keywords(query.job_title)
+        seen = set()
+        kw_list = []
+        for kw in expanded:
+            if kw.lower() not in seen:
+                seen.add(kw.lower())
+                kw_list.append(kw)
+    else:
+        kw_list = DEFAULT_KEYWORDS
 
     plan = []
     run_id = 0
@@ -231,94 +271,59 @@ def _build_run_plan(
                     "search_term": f"({kw})" if " OR " in kw else kw,
                     "hours_old": hours,
                     "location": loc,
-                    "is_remote": is_remote,
-                    "results_wanted": results_wanted,
+                    "is_remote": query.remote,
+                    "results_wanted": query.count,
                 })
+                
+    random.shuffle(plan)
     return plan
 
 
-def run_scraper(
-    locations: list[str] | None = None,
-    hours_windows: list[int] | None = None,
-    keywords: list[str] | None = None,
-    is_remote: bool = False,
-    results_wanted: int | None = None,
-) -> None:
-    """Run the full scraping pipeline, optionally multi-threaded."""
+def run_scraper(query: ParsedQuery) -> None:
+    """Run the full scraping pipeline based on the ParsedQuery."""
     config.OUT_DIR.mkdir(exist_ok=True)
     config.RAW_RUNS_DIR.mkdir(exist_ok=True)
 
-    # Expand keywords for better coverage
-    if keywords:
-        expanded = []
-        for kw in keywords:
-            expanded.extend(expand_keywords(kw))
-        # Deduplicate while preserving order
-        seen = set()
-        keywords = []
-        for kw in expanded:
-            if kw.lower() not in seen:
-                seen.add(kw.lower())
-                keywords.append(kw)
-
-    plan = _build_run_plan(locations, hours_windows, keywords, is_remote, results_wanted)
+    plan = _build_run_plan(query)
     total = len(plan)
 
     print(f"\n{_ANSI_BOLD}{'═' * 56}{_ANSI_RESET}")
-    print(f"{_ANSI_BOLD}  🔍  SCRAPING  │  {total} runs  │  {config.MAX_WORKERS} threads{_ANSI_RESET}")
-    if keywords:
-        print(f"{_ANSI_DIM}  Keywords: {', '.join(keywords)}{_ANSI_RESET}")
+    print(f"{_ANSI_BOLD}  🔍  SCRAPING  │  {total} runs  │  {query.workers} threads{_ANSI_RESET}")
     print(f"{_ANSI_BOLD}{'═' * 56}{_ANSI_RESET}\n")
 
     script_start = time.time()
     all_dfs: list[pd.DataFrame] = []
     stats = {"ok": 0, "empty": 0, "fail": 0, "total_rows": 0}
 
-    if config.MAX_WORKERS <= 1:
+    def execute_task(i: int, task: dict):
+        try:
+            df = scrape_one_run(**{k: task[k] for k in ["search_term", "hours_old", "location", "run_tag", "is_remote", "results_wanted"]})
+            rows = len(df)
+            if not df.empty:
+                all_dfs.append(df)
+                stats["ok"] += 1
+                stats["total_rows"] += rows
+                _tprint(f"  {_ANSI_GREEN}✓{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │ {rows:>4d} rows │ {task['search_term']}")
+            else:
+                stats["empty"] += 1
+                _tprint(f"  {_ANSI_DIM}·{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │    0 rows │ {task['search_term']}")
+        except Exception as e:
+            stats["fail"] += 1
+            _tprint(f"  {_ANSI_RED}✗{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │ ERROR     │ {e}")
+
+
+    if query.workers <= 1:
         for i, task in enumerate(plan, 1):
-            try:
-                df = scrape_one_run(**{k: task[k] for k in ["search_term", "hours_old", "location", "run_tag", "is_remote", "results_wanted"]})
-                rows = len(df)
-                if not df.empty:
-                    all_dfs.append(df)
-                    stats["ok"] += 1
-                    stats["total_rows"] += rows
-                    _tprint(f"  {_ANSI_GREEN}✓{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │ {rows:>4d} rows │ {task['search_term']}")
-                else:
-                    stats["empty"] += 1
-                    _tprint(f"  {_ANSI_DIM}·{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │    0 rows │ {task['search_term']}")
-            except Exception as e:
-                stats["fail"] += 1
-                _tprint(f"  {_ANSI_RED}✗{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │ ERROR     │ {e}")
+            execute_task(i, task)
             time.sleep(config.SLEEP_BETWEEN_RUNS_SEC)
     else:
-        with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
+        with ThreadPoolExecutor(max_workers=query.workers) as pool:
             futures = {}
             for task in plan:
-                f = pool.submit(
-                    scrape_one_run,
-                    **{k: task[k] for k in ["search_term", "hours_old", "location", "run_tag", "is_remote", "results_wanted"]},
-                )
+                f = pool.submit(execute_task, len(futures) + 1, task)
                 futures[f] = task
-
-            done_count = 0
             for future in as_completed(futures):
-                done_count += 1
-                task = futures[future]
-                try:
-                    df = future.result()
-                    rows = len(df)
-                    if not df.empty:
-                        all_dfs.append(df)
-                        stats["ok"] += 1
-                        stats["total_rows"] += rows
-                        _tprint(f"  {_ANSI_GREEN}✓{_ANSI_RESET} [{done_count}/{total}] {task['location']:<20s} │ {rows:>4d} rows │ {task['search_term']}")
-                    else:
-                        stats["empty"] += 1
-                        _tprint(f"  {_ANSI_DIM}·{_ANSI_RESET} [{done_count}/{total}] {task['location']:<20s} │    0 rows │ {task['search_term']}")
-                except Exception as e:
-                    stats["fail"] += 1
-                    _tprint(f"  {_ANSI_RED}✗{_ANSI_RESET} [{done_count}/{total}] {task['location']:<20s} │ ERROR     │ {e}")
+                pass # all printing is handled inside execute_task
 
     elapsed = time.time() - script_start
 
@@ -326,7 +331,6 @@ def run_scraper(
         print(f"\n{_ANSI_YELLOW}  ⚠  No results found. Try broader keywords or longer time window.{_ANSI_RESET}\n")
         return
 
-    # Filter out truly empty DFs before concat
     all_dfs = [df for df in all_dfs if len(df) > 0]
     merged = pd.concat(all_dfs, ignore_index=True)
     merged = merged[merged["description"].apply(has_nonempty_description)].copy()

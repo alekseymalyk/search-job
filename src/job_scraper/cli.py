@@ -1,14 +1,5 @@
 """
 CLI entry point for the Job Scraper pipeline.
-
-Usage:
-    job-scraper                                         # full pipeline (default config)
-    job-scraper scrape                                  # scrape only
-    job-scraper filter                                  # filter stage 1 only
-    job-scraper rank                                    # filter stage 2 only
-    job-scraper -q "3D artist remote"                   # short keyword query
-    job-scraper "знайди мені 100 компаній які шукають   # natural language query
-                 3D hard-surface artist, remote, ЄС"
 """
 
 import argparse
@@ -17,9 +8,8 @@ import traceback
 
 from job_scraper import __version__, config
 from job_scraper.scraper import run_scraper
-from job_scraper.filter_stage1 import run_stage1
-from job_scraper.filter_stage2 import run_stage2
-from job_scraper.query_parser import parse_query
+from job_scraper.processing import process_jobs
+from job_scraper.query_parser import parse_query, ParsedQuery
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -46,13 +36,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "-w", "--workers",
         type=int,
-        default=None,
-        help=f"Number of concurrent threads (default: {config.MAX_WORKERS})",
+        default=3,
+        help="Number of concurrent threads (default: 3)",
     )
     p.add_argument(
         "text",
         nargs="*",
-        help="Natural language query or subcommand (scrape/filter/rank/ui/all)",
+        help="Natural language query or subcommand (scrape/filter/ui/all)",
     )
 
     return p
@@ -62,33 +52,25 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    # Apply thread count override
-    if args.workers:
-        config.MAX_WORKERS = args.workers
-
-    # Join positional args
     text = " ".join(args.text).strip() if args.text else ""
 
-    # Check if it's a subcommand
-    subcommands = {"scrape", "filter", "rank", "all", "ui"}
+    subcommands = {"scrape", "filter", "all", "ui"}
     if text.lower() in subcommands:
         command = text.lower()
         nl_query = None
     elif args.query:
-        # Short query mode: -q "3D artist"
         command = "all"
         nl_query = args.query
     elif text:
-        # Natural language mode: everything is the query
         command = "all"
         nl_query = text
     else:
         command = "all"
         nl_query = None
 
-    # Parse natural language query if provided
     if nl_query:
         parsed = parse_query(nl_query)
+        parsed.workers = args.workers
         G = "\033[92m"; C = "\033[96m"; D = "\033[90m"; B = "\033[1m"; R = "\033[0m"
         print(f"\n{B}{'─' * 50}{R}")
         print(f"  {C}🧠 PARSED QUERY{R}")
@@ -98,83 +80,54 @@ def main() -> None:
         print(f"  🏠 Remote:   {G + '✓ Yes' + R if parsed.remote else D + '✗ No' + R}")
         print(f"  🌍 Locations: {', '.join(parsed.locations[:5]) + (f' +{len(parsed.locations)-5} more' if len(parsed.locations) > 5 else '') if parsed.locations else D + 'default' + R}")
         print(f"  📅 Max age:  {parsed.max_age_hours}h ({parsed.max_age_hours // 24}d)")
+        print(f"  ⚡ Workers:  {parsed.workers}")
         print(f"{B}{'─' * 50}{R}")
-
-        # Apply parsed parameters to config / scraper args
-        if parsed.job_title:
-            config.KEYWORD_SPLITS = [parsed.job_title]
-        if parsed.max_age_hours:
-            config.HOURS_WINDOWS = [parsed.max_age_hours]
-        if parsed.count:
-            config.RESULTS_WANTED_PER_RUN = parsed.count
-
-        # Store parsed data for scraper
-        _scraper_kwargs = {
-            "is_remote": parsed.remote,
-            "locations": parsed.locations or None,
-            "hours_windows": [parsed.max_age_hours] if parsed.max_age_hours else None,
-            "keywords": [parsed.job_title] if parsed.job_title else None,
-            "results_wanted": parsed.count,
-        }
     else:
-        _scraper_kwargs = {}
+        parsed = ParsedQuery(workers=args.workers)
 
-    # Execute
     if command == "ui":
         _start_ui()
     elif command == "scrape":
-        _step_scrape(**_scraper_kwargs)
+        _step_scrape(parsed)
     elif command == "filter":
-        _step_filter()
-    elif command == "rank":
-        _step_rank()
+        _step_filter(parsed)
     elif command == "all":
-        _run_all(**_scraper_kwargs)
+        _run_all(parsed)
     else:
         parser.print_help()
         sys.exit(1)
 
 
-def _step_scrape(**kwargs) -> None:
+def _step_scrape(parsed: ParsedQuery) -> None:
     try:
-        run_scraper(**kwargs)
+        run_scraper(parsed)
     except Exception as e:
         print(f"\033[91m  ✗ Scraper failed: {e}\033[0m")
         traceback.print_exc()
         sys.exit(1)
 
 
-def _step_filter() -> None:
-    print(f"\n\033[1m  ▸ Stage 2: Filtering...\033[0m")
+def _step_filter(parsed: ParsedQuery) -> None:
     try:
-        run_stage1()
+        process_jobs(parsed)
     except Exception as e:
-        print(f"\033[91m  ✗ Filter failed: {e}\033[0m")
+        print(f"\033[91m  ✗ Filter/Processing failed: {e}\033[0m")
         traceback.print_exc()
         sys.exit(1)
 
 
-def _step_rank() -> None:
-    print(f"\n\033[1m  ▸ Stage 3: Ranking...\033[0m")
-    try:
-        run_stage2()
-    except Exception as e:
-        print(f"\033[91m  ✗ Ranking failed: {e}\033[0m")
-        traceback.print_exc()
-        sys.exit(1)
-
-
-def _run_all(**kwargs) -> None:
+def _run_all(parsed: ParsedQuery) -> None:
     B = "\033[1m"; G = "\033[92m"; C = "\033[96m"; R = "\033[0m"
     print(f"\n{B}{'═' * 50}{R}")
     print(f"  {C}🔍 JOB SCRAPER PIPELINE{R}")
     print(f"{B}{'═' * 50}{R}")
-    _step_scrape(**kwargs)
-    _step_filter()
-    _step_rank()
+    
+    _step_scrape(parsed)
+    _step_filter(parsed)
+    
     print(f"\n{B}{'═' * 50}{R}")
     print(f"  {G}✓ PIPELINE COMPLETED{R}")
-    print(f"  {C}📄{R} Results: {config.STAGE2_OUT}")
+    print(f"  {C}📄{R} Results: {config.FINAL_CSV}")
     print(f"{B}{'═' * 50}{R}")
 
 
