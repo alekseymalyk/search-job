@@ -89,11 +89,16 @@ def main() -> None:
     # Parse natural language query if provided
     if nl_query:
         parsed = parse_query(nl_query)
-        print("=" * 50)
-        print("  PARSED QUERY")
-        print("=" * 50)
-        print(parsed.summary())
-        print("=" * 50)
+        G = "\033[92m"; C = "\033[96m"; D = "\033[90m"; B = "\033[1m"; R = "\033[0m"
+        print(f"\n{B}{'─' * 50}{R}")
+        print(f"  {C}🧠 PARSED QUERY{R}")
+        print(f"{B}{'─' * 50}{R}")
+        print(f"  🎯 Title:    {B}{parsed.job_title or '(default)'}{R}")
+        print(f"  📊 Results:  {parsed.count}")
+        print(f"  🏠 Remote:   {G + '✓ Yes' + R if parsed.remote else D + '✗ No' + R}")
+        print(f"  🌍 Locations: {', '.join(parsed.locations[:5]) + (f' +{len(parsed.locations)-5} more' if len(parsed.locations) > 5 else '') if parsed.locations else D + 'default' + R}")
+        print(f"  📅 Max age:  {parsed.max_age_hours}h ({parsed.max_age_hours // 24}d)")
+        print(f"{B}{'─' * 50}{R}")
 
         # Apply parsed parameters to config / scraper args
         if parsed.job_title:
@@ -131,46 +136,46 @@ def main() -> None:
 
 
 def _step_scrape(**kwargs) -> None:
-    print("\n[STEP 1] Scraping jobs...")
     try:
         run_scraper(**kwargs)
     except Exception as e:
-        print(f"Scraper failed: {e}")
+        print(f"\033[91m  ✗ Scraper failed: {e}\033[0m")
         traceback.print_exc()
         sys.exit(1)
 
 
 def _step_filter() -> None:
-    print("\n[STEP 2] Filtering (hard rejects + sponsor matching)...")
+    print(f"\n\033[1m  ▸ Stage 2: Filtering...\033[0m")
     try:
         run_stage1()
     except Exception as e:
-        print(f"Filter Stage 1 failed: {e}")
+        print(f"\033[91m  ✗ Filter failed: {e}\033[0m")
         traceback.print_exc()
         sys.exit(1)
 
 
 def _step_rank() -> None:
-    print("\n[STEP 3] Ranking (applied jobs similarity)...")
+    print(f"\n\033[1m  ▸ Stage 3: Ranking...\033[0m")
     try:
         run_stage2()
     except Exception as e:
-        print(f"Ranking Stage 2 failed: {e}")
+        print(f"\033[91m  ✗ Ranking failed: {e}\033[0m")
         traceback.print_exc()
         sys.exit(1)
 
 
 def _run_all(**kwargs) -> None:
-    print("=" * 50)
-    print("  JOB SCRAPER PIPELINE")
-    print("=" * 50)
+    B = "\033[1m"; G = "\033[92m"; C = "\033[96m"; R = "\033[0m"
+    print(f"\n{B}{'═' * 50}{R}")
+    print(f"  {C}🔍 JOB SCRAPER PIPELINE{R}")
+    print(f"{B}{'═' * 50}{R}")
     _step_scrape(**kwargs)
     _step_filter()
     _step_rank()
-    print("\n" + "=" * 50)
-    print("  PIPELINE COMPLETED")
-    print(f"  Results: {config.STAGE2_OUT}")
-    print("=" * 50)
+    print(f"\n{B}{'═' * 50}{R}")
+    print(f"  {G}✓ PIPELINE COMPLETED{R}")
+    print(f"  {C}📄{R} Results: {config.STAGE2_OUT}")
+    print(f"{B}{'═' * 50}{R}")
 
 
 def _start_ui() -> None:

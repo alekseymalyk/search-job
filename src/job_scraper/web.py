@@ -10,6 +10,7 @@ Run:
 """
 
 import json
+import logging
 import threading
 import webbrowser
 from pathlib import Path
@@ -19,6 +20,9 @@ from flask import Flask, Response, jsonify, send_file
 from job_scraper import config
 from job_scraper.query_parser import parse_query
 from job_scraper.scraper import run_scraper
+
+# Suppress Flask/Werkzeug access logs (GET /status etc.)
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 app = Flask(__name__)
 

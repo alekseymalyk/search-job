@@ -101,20 +101,41 @@ def _extract_count(text: str) -> int:
 
 def _extract_job_title(text: str) -> str:
     """Extract the job title from the query."""
-    # Try patterns like "шукають X", "ищут X", "looking for X", "find X artist"
+    # Noise words to strip from extracted titles
+    noise = (
+        r"\b(remote|віддален|удалён|удален|шукай|знайд|найд|мені|мне|"
+        r"позиці[їі]|вакансі[їій]|компані[їій]|jobs?|positions?|companies|"
+        r"країн|у\s+країн|в\s+стран|in\s+countr|maximum|максимум|"
+        r"також|also|надай|надаю|provide|за\s+останн|last|"
+        r"\d+\s*тижн|\d+\s*днів|\d+\s*дней|\d+\s*days|\d+\s*weeks?)\b"
+    )
+
     patterns = [
+        # "шукають 3D hard-surface artist"
         r"(?:шукають|шукає|шукати|ищут|ищет)\s+(.+?)(?:\.|,|надай|надаю|шукай|\n|$)",
-        r"(?:looking for|find|search for|searching for)\s+(.+?)(?:\.|,|provide|\n|$)",
-        r"(?:знайд[иі]|найд[иі])\s+\S+\s+\d+\s+\S+\s+\S+\s+\S+\s+(.+?)(?:\.|,|\n|$)",
-        r"(?:вакансі[їі]|позиці[їії]|jobs?|positions?)\s+(.+?)(?:\.|,|\n|$)",
+        # "looking for product manager" (must be before "find")
+        r"(?:looking for|search(?:ing)? for)\s+(.+?)(?:\.|,|provide|\n|$)",
+        # "find 200 companies looking for X"
+        r"(?:find|get|show)\s+\d+\s+\S+\s+looking\s+for\s+(.+?)(?:\.|,|provide|\n|$)",
+        # "find product manager"
+        r"(?:find|get|show)\s+(?!\d)(.+?)(?:\.|,|provide|in\s|\n|$)",
+        # "вакансій 3D artist" / "вакансій python developer, remote"
+        r"(?:вакансі[їій]|позиці[їій]|jobs?|positions?)\s+(.+?)(?:\.|,\s*(?:remote|віддален|удалён|шукай|країн|в\s)|\n|$)",
+        # "знайди мені 100 компаній які шукають X" (flexible word count)
+        r"(?:знайд[иі]|найд[иі]).+?(?:шукають|шукає|ищут)\s+(.+?)(?:\.|,|надай|надаю|шукай|\n|$)",
+        # "знайди 10 вакансій X" (number + noun + title)
+        r"(?:знайд[иі]|найд[иі])\s+\d+\s+\S+\s+(.+?)(?:\.|,\s*(?:remote|віддален|удалён|шукай|країн|у\s)|\n|$)",
+        # "найди 50 вакансий X" (Russian)
+        r"(?:найд[иі]|найти)\s+\d+\s+\S+\s+(.+?)(?:\.|,\s*(?:remote|удалён|страна|в\s)|\n|$)",
     ]
+
     for p in patterns:
         m = re.search(p, text, re.I)
         if m:
             title = m.group(1).strip()
-            # Clean up common trailing words
-            title = re.sub(r"\s*(надай|надаю|шукай|provide|search|також|also).*$", "", title, flags=re.I)
-            title = title.strip(" .,;:")
+            # Clean noise words from title
+            title = re.sub(noise, "", title, flags=re.I)
+            title = re.sub(r"\s+", " ", title).strip(" .,;:–—-")
             if len(title) > 2:
                 return title
 
@@ -123,8 +144,13 @@ def _extract_job_title(text: str) -> str:
     if m:
         return m.group(1)
 
-    # Fallback: look for capitalized multi-word phrases that look like job titles
-    m = re.search(r"\b(\d?D[\s\-]?\w[\w\s\-]{3,30}(?:artist|designer|modeler|animator))", text, re.I)
+    # Fallback: look for known job-title-like patterns
+    m = re.search(r"\b(\d?D[\s\-]?\w[\w\s\-]{3,30}(?:artist|designer|modeler|animator|developer))", text, re.I)
+    if m:
+        return m.group(1).strip()
+
+    # Fallback: look for "word word" patterns that look like job titles
+    m = re.search(r"\b([a-zA-Z][\w\s\-]{2,25}(?:artist|designer|developer|engineer|manager|analyst|specialist|consultant))\b", text, re.I)
     if m:
         return m.group(1).strip()
 
@@ -133,10 +159,13 @@ def _extract_job_title(text: str) -> str:
 
 def _extract_remote(text: str) -> bool:
     """Check if remote-only is requested."""
-    return bool(re.search(
-        r"\b(remote|віддален|удалён|удален|дистанц|remotely|work from home|wfh)\b",
-        text, re.I,
-    ))
+    t = text.lower()
+    # English words with word boundaries
+    if re.search(r"\b(remote|remotely|wfh|work\s+from\s+home)\b", t):
+        return True
+    # Cyrillic substrings (word boundaries don't work well with Unicode)
+    cyrillic_markers = ["віддален", "удалён", "удален", "дистанц"]
+    return any(m in t for m in cyrillic_markers)
 
 
 def _extract_locations(text: str) -> list[str]:
