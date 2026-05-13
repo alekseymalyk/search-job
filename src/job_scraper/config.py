@@ -6,7 +6,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # ── API / Scraper Constants ──
-SITES: list[str] = ["linkedin", "indeed", "glassdoor", "zip_recruiter"]
+SITES: list[str] = ["linkedin", "indeed"]
 COUNTRY_INDEED: str = "Netherlands"
 
 SLEEP_BETWEEN_RUNS_SEC: int = 6
