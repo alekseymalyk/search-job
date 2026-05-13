@@ -1,189 +1,153 @@
 # 🔍 Job Scraper
 
-Автоматизированный многопоточный пайплайн для скрейпинга вакансий с **LinkedIn** и **Indeed**.
-Понимает запросы на **украинском**, **русском** и **английском** языках.
-
-## ⚡ Быстрый старт (одна команда)
-
-```bash
-# 1. Установи uv (если ещё нет):
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Запусти — всё подтянется автоматически:
-uv run job-scraper
-
-# Или через main.py:
-uv run python main.py
-```
-
-> `uv run` сам создаст `.venv`, установит зависимости и запустит.
-> Никаких `pip install`, `venv`, `requirements.txt` — **одна команда**.
+Автоматизований пошук вакансій на **LinkedIn** та **Indeed**.
+Розуміє запити **українською**, **російською** та **англійською**.
 
 ---
 
-## 🧠 Естественный язык
+## ⚡ Як запустити (для тих, хто НЕ програміст)
 
-Пиши запрос как обычный текст — парсер сам вытащит параметры:
+### Крок 1: Встановити `uv` (один раз)
 
+**macOS / Linux** — відкрий Термінал і вставь:
 ```bash
-uv run python main.py "знайди мені 100 компаній які шукають 3D hard-surface artist. Шукай виключно remote позиції, шукай у країнах ЄС, США та Канади. Відфільтруй за зарплатнею. Максимум двох тиждневої давнини."
-```
-
-Что будет распознано:
-
-```
-  Job title:     3D hard-surface artist
-  Results:       100
-  Remote only:   True
-  Locations:     Austria, Belgium, ..., Poland, ..., United States, Canada
-  Max age:       336h (14d)
-  Salary filter: True
-```
-
-### Примеры запросов
-
-```bash
-# Украинский
-uv run python main.py "знайди 50 вакансій 3D artist, remote, ЄС, 2 тижні"
-
-# Русский
-uv run python main.py "найди 200 вакансий data analyst, удалённо, США и Канада, 7 дней"
-
-# English
-uv run python main.py "find 100 companies looking for product manager, remote, EU and USA"
-
-# Короткий запрос
-uv run python main.py -q "3D artist remote"
-```
-
----
-
-## 🚀 Установка
-
-### macOS / Linux
-
-```bash
-# Установка uv:
 curl -LsSf https://astral.sh/uv/install.sh | sh
-# или:
-brew install uv
-
-# Перейди в проект и запусти:
-cd Job_Scraper
-uv run job-scraper
 ```
 
-### Windows (PowerShell)
-
+**Windows** — відкрий PowerShell і вставь:
 ```powershell
-# Установка uv:
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-# или:
-winget install --id=astral-sh.uv -e
-# или:
-pip install uv
-
-# Перейди в проект и запусти:
-cd Job_Scraper
-uv run job-scraper
 ```
 
-### Windows (cmd)
+> ⚠️ Після встановлення **перезапусти термінал** (закрий і відкрий знову).
 
-```cmd
-pip install uv
-cd Job_Scraper
-uv run job-scraper
+### Крок 2: Відкрити папку проекту
+
+**macOS / Linux:**
+```bash
+cd шлях/до/Job_Scraper
 ```
 
-> **Windows:** перезапусти терминал после установки `uv`.
+**Windows:**
+```powershell
+cd шлях\до\Job_Scraper
+```
 
----
-
-## 🎯 Команды
-
-| Команда | Описание |
-|---------|----------|
-| `uv run job-scraper` | Полный пайплайн (scrape → filter → rank) |
-| `uv run job-scraper scrape` | Только скрейпинг |
-| `uv run job-scraper filter` | Только фильтрация (Stage 1) |
-| `uv run job-scraper rank` | Только ранжирование (Stage 2) |
-| `uv run job-scraper "текст"` | Естественный язык |
-| `uv run job-scraper -q "query"` | Короткий запрос |
-| `uv run job-scraper -w 5` | Указать число потоков |
-| `uv run job-scraper --version` | Версия |
-| `uv run job-scraper --help` | Справка |
-
-> Все команды также работают через `uv run python main.py ...`
-
----
-
-## ⚡ Многопоточность
-
-По умолчанию скрейпер запускает **3 потока** параллельно.
-Можно изменить:
+### Крок 3: Запустити
 
 ```bash
-# 5 потоков
-uv run job-scraper -w 5 "find 100 3D artist remote EU"
+uv run python main.py ui
+```
 
-# Однопоточный режим (безопаснее для LinkedIn)
-uv run job-scraper -w 1
+> 🎉 **Все!** Браузер відкриється автоматично з графічним інтерфейсом.
+> Просто введіть запит і натисніть кнопку.
 
-# Или в config.py:
-MAX_WORKERS: int = 3
+---
+
+## 🌐 Графічний інтерфейс (Web UI)
+
+Коли ви запускаєте `uv run python main.py ui`, відкривається
+веб-сторінка де все зрозуміло без інструкцій:
+
+1. **Введіть запит** — опишіть, які вакансії шукаєте (можна своєю мовою)
+2. **Або натисніть шаблон** — `🎨 3D Artist`, `📊 Data Analyst` тощо
+3. **Натисніть "🚀 Почати пошук"**
+4. **Дочекайтесь** — ви бачите прогрес в реальному часі
+5. **Завантажте CSV** — натисніть "📥 Завантажити CSV"
+
+### Приклади запитів:
+
+```
+знайди мені 100 компаній які шукають 3D hard-surface artist.
+Шукай remote позиції у ЄС, США та Канаді. Максимум 2 тижні.
+```
+
+```
+найди 50 вакансий data analyst, удалённо, США и Канада, 7 дней
+```
+
+```
+find 200 companies looking for product manager, remote, EU and USA
 ```
 
 ---
 
-## ⚙️ Конфигурация
+## 💻 Командний рядок (для просунутих)
 
-Все настройки — `src/job_scraper/config.py`:
+Якщо ви вмієте працювати з терміналом:
 
-| Параметр | Описание | По умолчанию |
-|----------|----------|-------------|
-| `SITES` | Сайты для скрейпинга | `["linkedin", "indeed"]` |
-| `MAX_WORKERS` | Число потоков | `3` |
-| `PROVINCE_TO_BIGGEST_CITY` | Города для поиска | 5 городов NL |
-| `HOURS_WINDOWS` | Временные окна | `[48, 168, 336]` |
-| `KEYWORD_SPLITS` | Поисковые запросы | 7 бизнес-запросов |
-| `RESULTS_WANTED_PER_RUN` | Макс. результатов | `3000` |
-| `SLEEP_BETWEEN_RUNS_SEC` | Пауза между запросами | `6` сек |
-| `SPONSOR_MATCH_THRESHOLD` | Порог спонсоров виз | `0.70` |
+```bash
+# Повний пайплайн з настройками за замовчуванням:
+uv run job-scraper
 
-### Дополнительные файлы (опционально)
+# Запит природньою мовою:
+uv run python main.py "знайди 100 вакансій 3D artist, remote, ЄС, 2 тижні"
 
-| Файл | Назначение |
-|------|-----------|
-| `visa_sponsors.csv` | Компании-спонсоры виз (1 колонка) |
-| `submitted_applications.csv` | Поданные заявки (Company, Position, Description) |
+# Тільки скрейпінг:
+uv run job-scraper scrape
 
-> Если отсутствуют — этапы фильтрации пропускаются с предупреждением.
+# Тільки фільтрація:
+uv run job-scraper filter
+
+# Тільки ранжування:
+uv run job-scraper rank
+
+# Короткий запит:
+uv run job-scraper -q "3D artist remote"
+
+# 5 потоків (швидше, але ризик блокування):
+uv run job-scraper -w 5 "find 100 3D artist EU"
+
+# Відкрити графічний інтерфейс:
+uv run python main.py ui
+```
 
 ---
 
-## 📁 Структура проекта
+## ⚙️ Налаштування
+
+Файл: `src/job_scraper/config.py`
+
+| Параметр | Опис | За замовчуванням |
+|----------|------|-----------------|
+| `SITES` | Сайти для пошуку | `["linkedin", "indeed"]` |
+| `MAX_WORKERS` | Кількість потоків | `3` |
+| `HOURS_WINDOWS` | Часові вікна (годин) | `[48, 168, 336]` |
+| `KEYWORD_SPLITS` | Пошукові запити | 7 бізнес-запитів |
+| `RESULTS_WANTED_PER_RUN` | Макс. результатів | `3000` |
+| `SLEEP_BETWEEN_RUNS_SEC` | Пауза між запитами | `6` сек |
+| `SPONSOR_MATCH_THRESHOLD` | Поріг для спонсорів віз | `0.70` |
+
+### Додаткові файли (опціонально)
+
+Покладіть у корінь проекту:
+
+| Файл | Призначення |
+|------|-----------|
+| `visa_sponsors.csv` | Компанії-спонсори віз (1 колонка) |
+| `submitted_applications.csv` | Раніше подані заявки (Company, Position, Description) |
+
+---
+
+## 📁 Структура проекту
 
 ```
 Job_Scraper/
-├── main.py                     # ← Точка входа
-├── pyproject.toml              # Зависимости и entry point
-├── uv.lock                     # Lock-файл
+├── main.py                     # ← Точка входу
+├── pyproject.toml              # Залежності
+├── uv.lock
 ├── README.md
-├── .gitignore
 │
 ├── src/job_scraper/
-│   ├── __init__.py             # Версия
-│   ├── __main__.py             # python -m job_scraper
-│   ├── cli.py                  # CLI (argparse)
-│   ├── config.py               # Настройки и пути
-│   ├── query_parser.py         # Парсер естественного языка
-│   ├── scraper.py              # Скрейпинг (многопоточный)
-│   ├── filter_stage1.py        # Фильтрация
-│   └── filter_stage2.py        # Ранжирование
+│   ├── cli.py                  # Командний рядок
+│   ├── web.py                  # Графічний інтерфейс (Web UI)
+│   ├── config.py               # Налаштування
+│   ├── query_parser.py         # Парсер запитів (укр/рус/англ)
+│   ├── scraper.py              # Скрейпінг (багатопоточний)
+│   ├── filter_stage1.py        # Фільтрація
+│   └── filter_stage2.py        # Ранжування
 │
-└── output/                     # Результаты (авто)
-    ├── runs_raw/
+└── output/                     # Результати
     ├── jobs.csv
     ├── jobs_stage1.csv
     └── jobs_final.csv
@@ -191,11 +155,12 @@ Job_Scraper/
 
 ---
 
-## ❓ Проблемы
+## ❓ Проблеми та вирішення
 
-| Проблема | Решение |
-|----------|---------|
-| `uv: command not found` | Установи uv, перезапусти терминал |
-| LinkedIn блокирует | Уменьши потоки: `-w 1`, увеличь `SLEEP_BETWEEN_RUNS_SEC` |
-| Пустой результат | Проверь запрос или расширь `HOURS_WINDOWS` |
-| `visa_sponsors.csv not found` | Это OK — фильтр просто пропускается |
+| Проблема | Вирішення |
+|----------|-----------|
+| `uv: command not found` | Встановіть uv (Крок 1), перезапустіть термінал |
+| Браузер не відкрився | Відкрийте вручну: `http://localhost:8080` |
+| LinkedIn блокує | Зменшіть потоки: `-w 1` |
+| Порт 8080 зайнятий | У `web.py` змініть `port=8080` на інший |
+| 0 результатів | Спробуйте ширший запит або більше часове вікно |

@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import sys
+import traceback
 
 from job_scraper import __version__, config
 from job_scraper.scraper import run_scraper
@@ -51,7 +52,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "text",
         nargs="*",
-        help="Natural language query or subcommand (scrape/filter/rank/all)",
+        help="Natural language query or subcommand (scrape/filter/rank/ui/all)",
     )
 
     return p
@@ -69,7 +70,7 @@ def main() -> None:
     text = " ".join(args.text).strip() if args.text else ""
 
     # Check if it's a subcommand
-    subcommands = {"scrape", "filter", "rank", "all"}
+    subcommands = {"scrape", "filter", "rank", "all", "ui"}
     if text.lower() in subcommands:
         command = text.lower()
         nl_query = None
@@ -114,7 +115,9 @@ def main() -> None:
         _scraper_kwargs = {}
 
     # Execute
-    if command == "scrape":
+    if command == "ui":
+        _start_ui()
+    elif command == "scrape":
         _step_scrape(**_scraper_kwargs)
     elif command == "filter":
         _step_filter()
@@ -133,6 +136,7 @@ def _step_scrape(**kwargs) -> None:
         run_scraper(**kwargs)
     except Exception as e:
         print(f"Scraper failed: {e}")
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -142,6 +146,7 @@ def _step_filter() -> None:
         run_stage1()
     except Exception as e:
         print(f"Filter Stage 1 failed: {e}")
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -151,6 +156,7 @@ def _step_rank() -> None:
         run_stage2()
     except Exception as e:
         print(f"Ranking Stage 2 failed: {e}")
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -165,3 +171,8 @@ def _run_all(**kwargs) -> None:
     print("  PIPELINE COMPLETED")
     print(f"  Results: {config.STAGE2_OUT}")
     print("=" * 50)
+
+
+def _start_ui() -> None:
+    from job_scraper.web import start_ui
+    start_ui()

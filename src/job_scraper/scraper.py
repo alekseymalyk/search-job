@@ -42,25 +42,27 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
     rename_map = {}
+    # Track which target names are already taken (in original columns OR pending renames)
+    taken = set(df.columns)
 
-    if "title" in df.columns and "position" not in df.columns:
-        rename_map["title"] = "position"
-    if "job_url" in df.columns and "url" not in df.columns:
-        rename_map["job_url"] = "url"
-    if "job_url_direct" in df.columns and "url" not in df.columns:
-        rename_map["job_url_direct"] = "url"
-    if "company_name" in df.columns and "company" not in df.columns:
-        rename_map["company_name"] = "company"
-    if "job_location" in df.columns and "location" not in df.columns:
-        rename_map["job_location"] = "location"
-    if "job_description" in df.columns and "description" not in df.columns:
-        rename_map["job_description"] = "description"
-    if "site" in df.columns and "source" not in df.columns:
-        rename_map["site"] = "source"
-    if "source" not in df.columns and "job_board" in df.columns:
-        rename_map["job_board"] = "source"
+    def _try_rename(src: str, dst: str) -> None:
+        if src in df.columns and dst not in taken:
+            rename_map[src] = dst
+            taken.add(dst)
+
+    _try_rename("title", "position")
+    _try_rename("job_url", "url")
+    _try_rename("job_url_direct", "url")
+    _try_rename("company_name", "company")
+    _try_rename("job_location", "location")
+    _try_rename("job_description", "description")
+    _try_rename("site", "source")
+    _try_rename("job_board", "source")
 
     df = df.rename(columns=rename_map)
+
+    # Safety: drop any duplicate columns that slipped through
+    df = df.loc[:, ~df.columns.duplicated()]
 
     for col in ["company", "position", "location", "url", "description", "source"]:
         if col not in df.columns:

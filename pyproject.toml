@@ -5,6 +5,7 @@ description = "Automated job scraper pipeline: scrape LinkedIn/Indeed → filter
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "flask>=3.0",
     "pandas>=2.0",
     "python-jobspy>=1.1",
 ]
