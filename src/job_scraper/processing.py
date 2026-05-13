@@ -311,8 +311,10 @@ def process_jobs(parsed: ParsedQuery = None) -> None:
         df["final_rank_score"] = df["rank_score"]
 
     df = df.sort_values("final_rank_score", ascending=False)
-    if config.TOP_N_FOR_LLM:
-        df = df.head(config.TOP_N_FOR_LLM)
+    
+    # Slice by requested count (or fallback to a large number like 5000 if not specified)
+    limit = parsed.count if (parsed and parsed.count > 0) else 5000
+    df = df.head(limit)
 
     config.FINAL_CSV.parent.mkdir(exist_ok=True)
     df.to_csv(config.FINAL_CSV, index=False)

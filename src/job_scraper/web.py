@@ -222,6 +222,18 @@ td a:hover{color:var(--text-muted);}
 .parsed-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 0.5rem; }
 .parsed-value { font-size: 0.9rem; font-weight: 500; }
 
+/* Charts */
+.analytics-card { display: none; }
+.analytics-card.active { display: block; animation: fade-in 0.6s ease-out; }
+.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 1.5rem; }
+.chart-section h3 { font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 1rem; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+.chart-row { display: flex; align-items: center; margin-bottom: 0.6rem; }
+.chart-label { width: 120px; font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chart-bar-bg { flex-grow: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 0 1rem; position: relative; }
+.chart-bar-fill { height: 100%; background: var(--text); border-radius: 3px; width: 0%; transition: width 1s cubic-bezier(0.4, 0, 0.2, 1); }
+.chart-val { font-size: 0.8rem; font-weight: 500; width: 30px; text-align: right; }
+@media(max-width:800px){ .chart-grid { grid-template-columns: 1fr; } }
+
 /* Custom Scrollbar */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
@@ -300,6 +312,14 @@ td a:hover{color:var(--text-muted);}
       </table>
     </div>
   </div>
+
+  <!-- ANALYTICS CARD -->
+  <div class="card analytics-card" id="analyticsCard">
+    <h2>05 // Data Insights & Salary Analysis</h2>
+    <div class="chart-grid" id="analyticsGrid">
+      <!-- Injected via JS -->
+    </div>
+  </div>
 </div>
 
 <script>
@@ -326,6 +346,7 @@ async function startSearch() {
   
   $('progressCard').classList.add('active');
   $('resultsCard').classList.remove('active');
+  $('analyticsCard').classList.remove('active');
   $('parsedCard').style.display = 'none';
   $('logBox').innerHTML = '';
   $('logBox').classList.remove('active');
@@ -403,7 +424,10 @@ async function pollStatus() {
       $('progressFill').style.width = '100%';
       $('progressLabel').textContent = 'Extraction complete.';
       $('progressCount').textContent = `Found ${data.result_count}`;
-      if (data.result_count > 0) loadResults();
+      if (data.result_count > 0) {
+        loadResults();
+        loadAnalytics();
+      }
       resetBtn();
     } else if (data.status === 'error') {
       clearInterval(pollTimer);
@@ -436,6 +460,50 @@ async function loadResults() {
         $('resultsCard').scrollIntoView({behavior: 'smooth', block: 'start'});
     }, 100);
   } catch(e) {}
+}
+
+async function loadAnalytics() {
+  try {
+    const res = await fetch('/analytics');
+    const data = await res.json();
+    if (!data.total_jobs) return;
+
+    let html = '';
+
+    const renderBars = (title, items, totalMax) => {
+      let block = `<div class="chart-section"><h3>${title}</h3>`;
+      if (!items || Object.keys(items).length === 0) {
+        block += `<div style="font-size:0.8rem; color:var(--text-muted);">No sufficient data.</div>`;
+      } else {
+        const maxVal = Math.max(...Object.values(items), totalMax || 1);
+        for (const [lbl, val] of Object.entries(items)) {
+          const pct = Math.round((val / maxVal) * 100);
+          block += `
+            <div class="chart-row">
+              <div class="chart-label" title="${esc(lbl)}">${esc(lbl)}</div>
+              <div class="chart-bar-bg"><div class="chart-bar-fill" style="width:${pct}%"></div></div>
+              <div class="chart-val">${val}</div>
+            </div>`;
+        }
+      }
+      block += `</div>`;
+      return block;
+    };
+
+    html += renderBars('Top Locations', data.locations);
+    html += renderBars('Top Companies', data.companies);
+    
+    if (data.salaries) {
+      html += renderBars('Est. Salary Distribution', data.salaries);
+    } else {
+      html += `<div class="chart-section"><h3>Est. Salary Distribution</h3><div style="font-size:0.8rem; color:var(--text-muted);">Not enough salary data found in descriptions.</div></div>`;
+    }
+
+    $('analyticsGrid').innerHTML = html;
+    $('analyticsCard').classList.add('active');
+  } catch(e) {
+    console.error(e);
+  }
 }
 
 function resetBtn() {
@@ -517,6 +585,67 @@ def results():
 
     records = df[cols].fillna("").head(500).to_dict(orient="records")
     return jsonify(records)
+
+
+@app.route("/analytics")
+def analytics():
+    import pandas as pd
+    import re
+    
+    csv_path = config.FINAL_CSV
+    if not csv_path.exists():
+        return jsonify({})
+        
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return jsonify({"total_jobs": 0})
+        
+    loc_counts = df['location'].value_counts().head(5).to_dict()
+    comp_counts = df['company'].value_counts().head(5).to_dict()
+    
+    salaries = []
+    if 'min_amount' in df.columns and 'max_amount' in df.columns:
+        for _, row in df.iterrows():
+            try:
+                mn = float(row.get('min_amount'))
+                mx = float(row.get('max_amount'))
+                if pd.notna(mn) and pd.notna(mx) and mn > 0:
+                    salaries.append((mn + mx) / 2)
+            except:
+                pass
+                
+    if len(salaries) < 5:
+        for desc in df['description'].dropna():
+            matches = re.findall(r'[\$€£]\s*(\d{2,3})[kK]', str(desc))
+            for m in matches:
+                try:
+                    val = float(m) * 1000
+                    if 20000 <= val <= 300000: salaries.append(val)
+                except:
+                    pass
+            matches = re.findall(r'[\$€£]\s*(\d{2,3}),(\d{3})', str(desc))
+            for m1, m2 in matches:
+                try:
+                    val = float(m1 + m2)
+                    if 20000 <= val <= 300000: salaries.append(val)
+                except:
+                    pass
+
+    salary_bins = {"< $50k": 0, "$50k-$100k": 0, "$100k-$150k": 0, "> $150k": 0}
+    has_salaries = False
+    for s in salaries:
+        has_salaries = True
+        if s < 50000: salary_bins["< $50k"] += 1
+        elif s < 100000: salary_bins["$50k-$100k"] += 1
+        elif s < 150000: salary_bins["$100k-$150k"] += 1
+        else: salary_bins["> $150k"] += 1
+        
+    return jsonify({
+        "locations": loc_counts,
+        "companies": comp_counts,
+        "salaries": salary_bins if has_salaries else None,
+        "total_jobs": len(df)
+    })
 
 
 @app.route("/download")

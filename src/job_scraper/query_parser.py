@@ -86,10 +86,24 @@ COUNTRY_ALIASES = {
 
 def _extract_count(text: str) -> int:
     """Extract the desired number of results."""
+    # Text mapping for written numbers
+    text_lower = text.lower()
+    mapping = {
+        "тисячу": 1000, "тисячі": 2000, "тысячу": 1000, "тысячи": 2000, "thousand": 1000,
+        "сотню": 100, "сотні": 200, "сотня": 100, "hundred": 100,
+        "п'ятсот": 500, "пятьсот": 500, "пятьдесят": 50, "п'ятдесят": 50,
+        "десяток": 10, "десять": 10
+    }
+    for k, v in mapping.items():
+        if k in text_lower:
+            return v
+            
+    # Regex patterns for digits
     patterns = [
         r"(\d+)\s*(?:компан|вакан|позиц|job|compan|position|result|offer|listing)",
         r"(?:знайд|найд|find|get|show|search)\D{0,20}(\d+)",
         r"(?:топ|top)\s*[-–]?\s*(\d+)",
+        r"\b(\d+)\b" # Fallback standalone number
     ]
     for p in patterns:
         m = re.search(p, text, re.I)
