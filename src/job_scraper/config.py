@@ -78,7 +78,7 @@ DESC_BLOCK_PATTERNS = _custom_config.get("desc_block_patterns", [
 
 TITLE_BLOCK_PATTERNS = _custom_config.get("title_block_patterns", [
     "intern", "internship", "trainee", "traineeship",
-    "part-time", "part time", "für"
+    "part-time", "part time"
 ])
 
 LOCATION_BLOCK_PATTERNS = _custom_config.get("location_block_patterns", ["germany"])

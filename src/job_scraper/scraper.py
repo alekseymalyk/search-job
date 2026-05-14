@@ -447,7 +447,12 @@ def run_scraper(query: ParsedQuery, task_id: str = None, cancel_check=None) -> N
 
     all_dfs = [df for df in all_dfs if len(df) > 0]
     merged = pd.concat(all_dfs, ignore_index=True)
-    merged = merged[merged["description"].apply(has_nonempty_description)].copy()
+    if config.REQUIRE_NONEMPTY_DESCRIPTION:
+        merged = merged[merged["description"].apply(has_nonempty_description)].copy()
+    
+    # Drop jobs with empty titles - they are useless
+    merged = merged[merged["position"].astype(str).str.strip() != ""].copy()
+    
     merged = dedupe_jobs(merged)
 
     config.JOBS_CSV.parent.mkdir(exist_ok=True)

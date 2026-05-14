@@ -102,7 +102,7 @@ def best_match_company(company_raw: str, applied_map: dict) -> tuple[str, float]
 
 def tokenize(text: str) -> list[str]:
     t = RE_SPACES.sub(" ", RE_TOKENIZE_1.sub(" ", str(text).lower())).strip()
-    allowed_short = {"3d", "2d", "ui", "ux", "qa", "ai", "pr"}
+    allowed_short = {"3d", "2d", "ui", "ux", "qa", "ai", "pr", "c#", "c++", "go", "php", "sql", "ml"}
     return [w for w in t.split() if (len(w) >= 3 or w in allowed_short) and w not in STOPWORDS]
 
 def build_keyword_profile(desc_series: pd.Series, top_k: int = 300) -> set[str]:
@@ -216,7 +216,7 @@ def process_jobs(parsed: ParsedQuery = None, task_id: str = None) -> None:
     desc_block_re = contains_any_re(config.DESC_BLOCK_PATTERNS)
 
     if config.REQUIRE_NONEMPTY_DESCRIPTION:
-        empty_mask = jobs["description"].str.strip() == ""
+        empty_mask = ~jobs["description"].apply(is_nonempty)
         for idx in jobs[empty_mask].index: add_sample("desc_empty", jobs.loc[idx])
         reject_counts["desc_empty"] += empty_mask.sum()
         mask_keep &= ~empty_mask
@@ -246,22 +246,30 @@ def process_jobs(parsed: ParsedQuery = None, task_id: str = None) -> None:
         reject_counts["desc_block"] += db_mask.sum()
         mask_keep &= ~db_mask
 
-    # Job Title Relevance (Loosened - only reject if 0 overlap)
+    # Job Title Relevance (Boost based, not hard reject)
     if parsed and parsed.job_title:
         expected_tokens = set(tokenize(parsed.job_title))
         if expected_tokens:
-            def match_title(title):
-                return bool(expected_tokens & set(tokenize(title)))
-            title_match_mask = jobs["position"].apply(match_title)
-            for idx in jobs[~title_match_mask].index: add_sample("irrelevant_title", jobs.loc[idx])
-            reject_counts["irrelevant_title"] += (~title_match_mask).sum()
-            mask_keep &= title_match_mask
+            def get_title_match_score(title):
+                tokens = set(tokenize(title))
+                if not tokens: return 0.5
+                overlap = len(expected_tokens & tokens) / len(expected_tokens)
+                return overlap
+            
+            # We don't use a mask here, we just use it for scoring later
+            pass
 
     if parsed and parsed.remote:
         # Check remote in all key fields
         def is_remote_check(row):
+            # If it's from a major board and we requested remote, trust the board's flag
+            # (since scraper.py already passed is_remote=True to JobSpy)
+            if str(row.get("source", "")).lower() in ["linkedin", "indeed", "glassdoor", "zip_recruiter"]:
+                return True
+                
             text = f'{row.get("position","")} {row.get("location","")} {row.get("description","")}'.lower()
-            return any(m in text for m in ["remote", "віддален", "удалён", "удален", "дистанц"])
+            remote_markers = ["remote", "віддален", "удалён", "удален", "дистанц", "wfh", "work from home", "home office", "telework"]
+            return any(m in text for m in remote_markers)
         
         remote_mask = jobs.apply(is_remote_check, axis=1)
         for idx in jobs[~remote_mask].index: add_sample("not_remote", jobs.loc[idx])
@@ -294,6 +302,15 @@ def process_jobs(parsed: ParsedQuery = None, task_id: str = None) -> None:
             sp_name, sp_score = best_match_company(comp, sponsor_map) if sponsor_map else ("", 1.0)
             
             score = sp_score * 10.0
+            
+            # Add title relevance boost
+            if parsed and parsed.job_title:
+                expected_tokens = set(tokenize(parsed.job_title))
+                tokens = set(tokenize(title_l))
+                if expected_tokens and tokens:
+                    overlap = len(expected_tokens & tokens) / len(expected_tokens)
+                    score += overlap * 5.0 # Boost up to 5 points for title match
+
             for keyword, boost in config.TITLE_BOOSTS.items():
                 if keyword in title_l:
                     score += boost
