@@ -93,7 +93,7 @@ textarea::placeholder{color:var(--text-muted);}
 }
 .btn-download:hover{background:var(--green);color:var(--bg); box-shadow: 0 0 15px rgba(52, 211, 153, 0.3);}
 
-/* Presets */
+/* Presets & Chips */
 .presets{display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:1rem;}
 .preset{
   background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.1);border-radius:20px;
@@ -101,6 +101,25 @@ textarea::placeholder{color:var(--text-muted);}
   cursor:pointer;transition:all 0.3s ease;
 }
 .preset:hover{border-color:rgba(255,255,255,0.3);color:var(--text);background:rgba(255,255,255,0.08);transform:translateY(-1px);box-shadow:var(--glow);}
+
+.source-chip { position:relative; cursor:pointer; display:inline-flex; align-items:center; }
+.source-chip input { position:absolute; opacity:0; cursor:pointer; height:0; width:0; }
+.source-chip span {
+  background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.08); border-radius:20px;
+  padding:0.4rem 0.9rem; font-size:0.8rem; color:var(--text-muted); transition:all 0.25s ease;
+  user-select:none; display:flex; align-items:center; gap:0.4rem;
+}
+.source-chip span::before {
+  content: ''; display:inline-block; width:6px; height:6px; border-radius:50%;
+  background:var(--text-muted); opacity:0.3; transition:all 0.25s ease;
+}
+.source-chip:hover span { background:rgba(255,255,255,0.06); border-color:rgba(255,255,255,0.2); }
+.source-chip input:checked ~ span {
+  background:rgba(255,255,255,0.12); border-color:rgba(255,255,255,0.4); color:var(--text); box-shadow:var(--glow);
+}
+.source-chip input:checked ~ span::before {
+  background:var(--text); opacity:1; box-shadow:0 0 8px rgba(255,255,255,0.8);
+}
 
 /* Smart Suggestions */
 .suggest-container { position: relative; }
@@ -266,6 +285,28 @@ td a:hover{color:var(--text-muted);}
 
     <div class="settings">
       <label>Threads: <input type="number" id="workers" value="3" min="1" max="10"></label>
+    </div>
+
+    <div class="site-selection" style="margin-top: 1.5rem;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+        <h3 style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em; display:flex; align-items:center; gap:0.5rem; margin:0;">
+          Data Sources <span style="font-size:0.65rem; padding:2px 6px; background:rgba(255,255,255,0.05); border-radius:10px; font-weight:normal;">Target Platforms</span>
+        </h3>
+        <div style="display:flex; gap:0.5rem;">
+          <button class="preset" style="font-size:0.65rem; padding:2px 8px;" onclick="toggleAllSites(true)">All</button>
+          <button class="preset" style="font-size:0.65rem; padding:2px 8px;" onclick="toggleAllSites(false)">Clear</button>
+          <button class="preset" style="font-size:0.65rem; padding:2px 8px; border-color:var(--text-muted);" onclick="selectGameSites()">🎮 Game Mode</button>
+        </div>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:0.6rem;" id="siteContainer">
+        <label class="source-chip"><input type="checkbox" name="site" value="linkedin" checked> <span>LinkedIn</span></label>
+        <label class="source-chip"><input type="checkbox" name="site" value="indeed" checked> <span>Indeed</span></label>
+        <label class="source-chip"><input type="checkbox" name="site" value="glassdoor"> <span>Glassdoor</span></label>
+        <label class="source-chip"><input type="checkbox" name="site" value="ingamejob"> <span>InGame Job</span></label>
+        <label class="source-chip"><input type="checkbox" name="site" value="hitmarker"> <span>Hitmarker</span></label>
+        <label class="source-chip"><input type="checkbox" name="site" value="gamejobs"> <span>gamejobs.work</span></label>
+        <label class="source-chip"><input type="checkbox" name="site" value="animatedjobs"> <span>animatedjobs.com</span></label>
+      </div>
     </div>
 
     <div style="display:flex; gap:1rem; margin-top:1.5rem;">
@@ -442,11 +483,24 @@ let currentTaskId = null;
 let globalJobs = [];
 let activeFilters = {};
 
+function toggleAllSites(checked) {
+  document.querySelectorAll('input[name="site"]').forEach(i => i.checked = checked);
+}
+
+function selectGameSites() {
+  toggleAllSites(false);
+  const gameSites = ['ingamejob', 'hitmarker', 'gamejobs', 'animatedjobs'];
+  document.querySelectorAll('input[name="site"]').forEach(i => {
+    if (gameSites.includes(i.value)) i.checked = true;
+  });
+}
+
 async function startSearch() {
   const query = $('query').value.trim();
   if (!query) return;
 
   const workers = parseInt($('workers').value) || 3;
+  const sites = Array.from(document.querySelectorAll('input[name="site"]:checked')).map(cb => cb.value);
 
   // UI state transition
   const btn = $('searchBtn');
@@ -476,7 +530,7 @@ async function startSearch() {
     const res = await fetch('/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, workers })
+      body: JSON.stringify({ query, workers, sites })
     });
     const data = await res.json();
 

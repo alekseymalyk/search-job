@@ -559,8 +559,14 @@ def search():
         workers = 3
     workers = max(1, min(10, workers))
 
+    # Extract selected sites from frontend
+    selected_sites = data.get("sites", ["linkedin", "indeed"])
+    if not isinstance(selected_sites, list) or not selected_sites:
+        selected_sites = ["linkedin", "indeed"]
+
     parsed = parse_query(query_text)
     parsed.workers = workers
+    parsed.sites = selected_sites
 
     task_id = str(uuid.uuid4())
     _init_task(task_id)

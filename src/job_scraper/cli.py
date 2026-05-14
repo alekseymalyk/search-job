@@ -5,6 +5,16 @@ CLI entry point for the Job Scraper pipeline.
 import argparse
 import sys
 import traceback
+import logging
+import warnings
+from urllib3.exceptions import InsecureRequestWarning
+
+# Early warning suppression
+warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message="The `dict` method is deprecated")
+warnings.filterwarnings("ignore", message="This package (`duckduckgo_search`) has been renamed")
+logging.captureWarnings(True)
 
 from job_scraper import __version__, config
 from job_scraper.scraper import run_scraper

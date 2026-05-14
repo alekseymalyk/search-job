@@ -36,6 +36,7 @@ class ParsedQuery:
     salary_filter: bool = False
     raw_query: str = ""
     workers: int = 3
+    sites: list[str] = field(default_factory=lambda: ["linkedin", "indeed"])
 
     def summary(self) -> str:
         lines = [

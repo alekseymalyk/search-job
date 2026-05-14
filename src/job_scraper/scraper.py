@@ -21,11 +21,26 @@ from jobspy import scrape_jobs
 from job_scraper import config
 from job_scraper.query_parser import ParsedQuery
 from job_scraper.logger import get_task_logger
+from job_scraper.custom_scrapers import (
+    scrape_hitmarker, scrape_ingamejob, scrape_gamejobs, scrape_animatedjobs
+)
 
 # ── Suppress noisy third-party output ──
-logging.getLogger("jobspy").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("tls_client").setLevel(logging.WARNING)
+import warnings
+from urllib3.exceptions import InsecureRequestWarning
+
+# Suppress SSL warnings and common library noise
+warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message="The `dict` method is deprecated")
+warnings.filterwarnings("ignore", message="This package (`duckduckgo_search`) has been renamed")
+logging.captureWarnings(True)
+
+logging.getLogger("jobspy").setLevel(logging.CRITICAL)
+logging.getLogger("duckduckgo_search").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+logging.getLogger("py.warnings").setLevel(logging.CRITICAL)
+logging.getLogger("tls_client").setLevel(logging.CRITICAL)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 _ANSI_GREEN = "\033[92m"
@@ -181,8 +196,15 @@ def scrape_one_run(
     run_tag: str,
     is_remote: bool = False,
     results_wanted: int = 100,
+    sites: list[str] = None,
+    logger = None,
 ) -> pd.DataFrame:
     run_start = time.time()
+    if not sites:
+        sites = ["linkedin", "indeed"]
+
+    supported_sites = [s for s in sites if s in ("linkedin", "indeed", "glassdoor", "zip_recruiter")]
+    unsupported_sites = [s for s in sites if s not in supported_sites]
 
     loc_lower = location.lower().strip()
     if loc_lower in ("czech republic", "czechia"):
@@ -192,43 +214,83 @@ def scrape_one_run(
     else:
         country_indeed = config.COUNTRY_INDEED
 
-    kwargs = dict(
-        site_name=config.SITES,
-        search_term=search_term,
-        location=location,
-        hours_old=hours_old,
-        results_wanted=results_wanted,
-        linkedin_fetch_description=True,
-        country_indeed=country_indeed,
-        verbose=0,
-    )
-    if is_remote:
-        kwargs["is_remote"] = True
+    df_list = []
+    
+    # 1. Scrape supported sites using JobSpy
+    if supported_sites:
+        kwargs = dict(
+            site_name=supported_sites,
+            search_term=search_term,
+            location=location,
+            hours_old=hours_old,
+            results_wanted=results_wanted,
+            linkedin_fetch_description=True,
+            country_indeed=country_indeed,
+            verbose=0,
+        )
+        if is_remote:
+            kwargs["is_remote"] = True
 
-    max_retries = 3
-    df = None
-    last_err = None
+        max_retries = 3
+        df_jobspy = None
+        last_err = None
 
-    for attempt in range(max_retries):
-        try:
-            df = scrape_jobs(**kwargs)
-            break
-        except Exception as e:
-            last_err = e
-            err_str = str(e).lower()
-            if "max retries exceeded" in err_str or "nodename nor servname" in err_str or "429" in err_str or "invalid country" in err_str:
-                if "invalid country" in err_str:
-                    kwargs["country_indeed"] = "worldwide"
-                if attempt < max_retries - 1:
-                    wait_time = random.uniform(10, 30) * (attempt + 1)
-                    time.sleep(wait_time)
-                    continue
-            raise last_err
+        for attempt in range(max_retries):
+            try:
+                if logger:
+                    logger.info(f"Scraping [{','.join(supported_sites)}] via JobSpy for '{search_term}'...")
+                df_jobspy = scrape_jobs(**kwargs)
+                break
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                if "max retries exceeded" in err_str or "nodename nor servname" in err_str or "429" in err_str or "invalid country" in err_str:
+                    if "invalid country" in err_str:
+                        kwargs["country_indeed"] = "worldwide"
+                    if attempt < max_retries - 1:
+                        wait_time = random.uniform(10, 30) * (attempt + 1)
+                        time.sleep(wait_time)
+                        continue
+                if logger:
+                    logger.warning(f"JobSpy Error: {e}")
+                # Don't raise, just skip JobSpy if it fails completely
+                break
+                
+        if df_jobspy is not None and len(df_jobspy) > 0:
+            df_list.append(pd.DataFrame(df_jobspy))
+            
+    # 2. Scrape external boards using search engine logic
+    site_map = {
+        "hitmarker": scrape_hitmarker,
+        "ingamejob": scrape_ingamejob,
+        "gamejobs": scrape_gamejobs,
+        "animatedjobs": scrape_animatedjobs
+    }
 
-    if df is None or len(df) == 0:
+    for usite in unsupported_sites:
+        if usite in site_map:
+            if logger:
+                logger.info(f"Querying external board [{usite}] for '{search_term}'...")
+            try:
+                df_ext = site_map[usite](search_term, location)
+                if not df_ext.empty:
+                    df_list.append(df_ext)
+                    if logger:
+                        logger.info(f"Processed [{usite}]: {len(df_ext)} results found.")
+                else:
+                    if logger:
+                        logger.info(f"Processed [{usite}]: 0 results found.")
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Failed to scrape {usite}: {e}")
+        else:
+            if logger:
+                logger.info(f"Skipping unknown source [{usite}].")
+
+    if not df_list:
         return pd.DataFrame()
 
-    df = pd.DataFrame(df)
+    df = pd.concat(df_list, ignore_index=True)
     df = normalize_columns(df)
 
     df["run_query"] = search_term
@@ -321,7 +383,11 @@ def run_scraper(query: ParsedQuery, task_id: str = None, cancel_check=None) -> N
         if stop_flag[0] or (cancel_check and cancel_check()):
             return None
         try:
-            df = scrape_one_run(**{k: task[k] for k in ["search_term", "hours_old", "location", "run_tag", "is_remote", "results_wanted"]})
+            kwargs = {k: task[k] for k in ["search_term", "hours_old", "location", "run_tag", "is_remote", "results_wanted"]}
+            kwargs["sites"] = query.sites
+            kwargs["logger"] = logger
+            
+            df = scrape_one_run(**kwargs)
             if cancel_check and cancel_check():
                 return None
             rows = len(df)
