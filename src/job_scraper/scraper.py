@@ -10,16 +10,17 @@ import os
 import re
 import time
 import random
+import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from threading import Lock
 
 import pandas as pd
 from jobspy import scrape_jobs
 
 from job_scraper import config
 from job_scraper.query_parser import ParsedQuery
+from job_scraper.logger import get_task_logger
 
 # ── Suppress noisy third-party output ──
 logging.getLogger("jobspy").setLevel(logging.WARNING)
@@ -27,7 +28,6 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("tls_client").setLevel(logging.WARNING)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-_print_lock = Lock()
 _ANSI_GREEN = "\033[92m"
 _ANSI_RED = "\033[91m"
 _ANSI_YELLOW = "\033[93m"
@@ -51,12 +51,6 @@ DEFAULT_KEYWORDS = [
     "business OR strategy OR planning OR insights OR analytics",
     "product OR implementation OR onboarding OR rollout OR delivery",
 ]
-
-
-def _tprint(*args, **kwargs):
-    """Thread-safe print."""
-    with _print_lock:
-        print(*args, **kwargs)
 
 
 # ───────────────────────── HELPERS ─────────────────────────
@@ -158,9 +152,16 @@ def expand_keywords(title: str) -> list[str]:
     synonyms = {
         "artist": ["designer", "modeler"],
         "developer": ["engineer", "programmer"],
+        "engineer": ["developer"],
+        "programmer": ["developer", "engineer"],
         "manager": ["lead", "coordinator"],
         "analyst": ["specialist", "consultant"],
         "designer": ["artist", "creator"],
+        "modeler": ["artist", "designer"],
+        "animator": ["artist"],
+        "architect": ["engineer", "lead"],
+        "consultant": ["specialist", "analyst"],
+        "administrator": ["engineer", "specialist"],
     }
     last = words[-1].lower() if words else ""
     if last in synonyms:
@@ -219,7 +220,8 @@ def scrape_one_run(
                 if "invalid country" in err_str:
                     kwargs["country_indeed"] = "worldwide"
                 if attempt < max_retries - 1:
-                    time.sleep(random.uniform(2, 5) * (attempt + 1))
+                    wait_time = random.uniform(10, 30) * (attempt + 1)
+                    time.sleep(wait_time)
                     continue
             raise last_err
 
@@ -256,7 +258,21 @@ def _build_run_plan(query: ParsedQuery) -> list[dict]:
                 seen.add(kw.lower())
                 kw_list.append(kw)
     else:
-        kw_list = DEFAULT_KEYWORDS
+        # No title extracted — try transliterating the raw query as last resort
+        if query.raw_query:
+            from job_scraper.query_parser import _transliterate_tech_terms, _STRIP_COMMAND_WORDS, _STRIP_COUNT_WORDS
+            fallback = query.raw_query
+            fallback = _STRIP_COMMAND_WORDS.sub(" ", fallback)
+            fallback = re.sub(r"\b\d+\b", " ", fallback)
+            fallback = _STRIP_COUNT_WORDS.sub(" ", fallback)
+            fallback = _transliterate_tech_terms(fallback)
+            fallback = re.sub(r"\s+", " ", fallback).strip()
+            if len(fallback) > 2:
+                kw_list = expand_keywords(fallback)
+            else:
+                kw_list = DEFAULT_KEYWORDS
+        else:
+            kw_list = DEFAULT_KEYWORDS
 
     plan = []
     run_id = 0
@@ -272,49 +288,66 @@ def _build_run_plan(query: ParsedQuery) -> list[dict]:
                     "hours_old": hours,
                     "location": loc,
                     "is_remote": query.remote,
-                    "results_wanted": query.count,
+                    "results_wanted": max(30, query.count),
                 })
                 
     random.shuffle(plan)
     return plan
 
 
-def run_scraper(query: ParsedQuery) -> None:
+def run_scraper(query: ParsedQuery, task_id: str = None, cancel_check=None) -> None:
     """Run the full scraping pipeline based on the ParsedQuery."""
+    logger = get_task_logger(task_id) if task_id else logging.getLogger(__name__)
+
     config.OUT_DIR.mkdir(exist_ok=True)
     config.RAW_RUNS_DIR.mkdir(exist_ok=True)
 
     plan = _build_run_plan(query)
     total = len(plan)
 
-    print(f"\n{_ANSI_BOLD}{'═' * 56}{_ANSI_RESET}")
-    print(f"{_ANSI_BOLD}  🔍  SCRAPING  │  {total} runs  │  {query.workers} threads{_ANSI_RESET}")
-    print(f"{_ANSI_BOLD}{'═' * 56}{_ANSI_RESET}\n")
+    logger.info(f"\n{_ANSI_BOLD}{'═' * 56}{_ANSI_RESET}")
+    logger.info(f"{_ANSI_BOLD}  🔍  SCRAPING  │  {total} runs  │  {query.workers} threads{_ANSI_RESET}")
+    logger.info(f"{_ANSI_BOLD}{'═' * 56}{_ANSI_RESET}\n")
 
     script_start = time.time()
     all_dfs: list[pd.DataFrame] = []
     stats = {"ok": 0, "empty": 0, "fail": 0, "total_rows": 0}
+    _stats_lock = threading.Lock()
+    
+    target_raw_jobs = max(40, query.count * 4)
+    stop_flag = [False]
 
     def execute_task(i: int, task: dict):
+        if stop_flag[0] or (cancel_check and cancel_check()):
+            return None
         try:
             df = scrape_one_run(**{k: task[k] for k in ["search_term", "hours_old", "location", "run_tag", "is_remote", "results_wanted"]})
+            if cancel_check and cancel_check():
+                return None
             rows = len(df)
-            if not df.empty:
-                all_dfs.append(df)
-                stats["ok"] += 1
-                stats["total_rows"] += rows
-                _tprint(f"  {_ANSI_GREEN}✓{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │ {rows:>4d} rows │ {task['search_term']}")
-            else:
-                stats["empty"] += 1
-                _tprint(f"  {_ANSI_DIM}·{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │    0 rows │ {task['search_term']}")
+            with _stats_lock:
+                if not df.empty:
+                    all_dfs.append(df)
+                    stats["ok"] += 1
+                    stats["total_rows"] += rows
+                    logger.info(f"  {_ANSI_GREEN}✓{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │ {rows:>4d} rows │ {task['search_term']}")
+                else:
+                    stats["empty"] += 1
+                    logger.info(f"  {_ANSI_DIM}·{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │    0 rows │ {task['search_term']}")
+            return df
         except Exception as e:
-            stats["fail"] += 1
-            _tprint(f"  {_ANSI_RED}✗{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │ ERROR     │ {e}")
-
+            with _stats_lock:
+                stats["fail"] += 1
+            logger.info(f"  {_ANSI_RED}✗{_ANSI_RESET} [{i}/{total}] {task['location']:<20s} │ ERROR     │ {e}")
+            return None
 
     if query.workers <= 1:
         for i, task in enumerate(plan, 1):
-            execute_task(i, task)
+            if stop_flag[0] or (cancel_check and cancel_check()): break
+            df = execute_task(i, task)
+            if df is not None and not df.empty and stats["total_rows"] >= target_raw_jobs:
+                logger.info(f"  {_ANSI_YELLOW}⚠ Reached target of {target_raw_jobs} raw jobs. Stopping early...{_ANSI_RESET}")
+                stop_flag[0] = True
             time.sleep(config.SLEEP_BETWEEN_RUNS_SEC)
     else:
         with ThreadPoolExecutor(max_workers=query.workers) as pool:
@@ -323,12 +356,27 @@ def run_scraper(query: ParsedQuery) -> None:
                 f = pool.submit(execute_task, len(futures) + 1, task)
                 futures[f] = task
             for future in as_completed(futures):
-                pass # all printing is handled inside execute_task
+                try:
+                    if cancel_check and cancel_check():
+                        stop_flag[0] = True
+                        for f in futures:
+                            f.cancel()
+                        break
+                    df = future.result()
+                    with _stats_lock:
+                        should_stop = df is not None and not df.empty and stats["total_rows"] >= target_raw_jobs and not stop_flag[0]
+                    if should_stop:
+                        logger.info(f"  {_ANSI_YELLOW}⚠ Reached target of {target_raw_jobs} raw jobs. Stopping early...{_ANSI_RESET}")
+                        stop_flag[0] = True
+                        for f in futures:
+                            f.cancel()
+                except Exception as exc:
+                    logger.debug(f"Task future raised: {exc}")
 
     elapsed = time.time() - script_start
 
     if not all_dfs:
-        print(f"\n{_ANSI_YELLOW}  ⚠  No results found. Try broader keywords or longer time window.{_ANSI_RESET}\n")
+        logger.info(f"\n{_ANSI_YELLOW}  ⚠  No results found. Try broader keywords or longer time window.{_ANSI_RESET}\n")
         return
 
     all_dfs = [df for df in all_dfs if len(df) > 0]
@@ -339,9 +387,9 @@ def run_scraper(query: ParsedQuery) -> None:
     config.JOBS_CSV.parent.mkdir(exist_ok=True)
     merged.to_csv(config.JOBS_CSV, index=False)
 
-    print(f"\n{_ANSI_BOLD}{'─' * 56}{_ANSI_RESET}")
-    print(f"  {_ANSI_GREEN}✓{_ANSI_RESET} With results: {stats['ok']}  │  {_ANSI_DIM}Empty: {stats['empty']}{_ANSI_RESET}  │  {_ANSI_RED if stats['fail'] else _ANSI_DIM}Failed: {stats['fail']}{_ANSI_RESET}")
-    print(f"  {_ANSI_CYAN}📄{_ANSI_RESET} Raw rows: {stats['total_rows']}  →  After dedup: {_ANSI_BOLD}{len(merged)}{_ANSI_RESET}")
-    print(f"  {_ANSI_CYAN}💾{_ANSI_RESET} Saved: {config.JOBS_CSV}")
-    print(f"  {_ANSI_CYAN}⏱ {_ANSI_RESET} Time: {elapsed:.1f}s ({elapsed / 60:.1f} min)")
-    print(f"{_ANSI_BOLD}{'─' * 56}{_ANSI_RESET}\n")
+    logger.info(f"\n{_ANSI_BOLD}{'─' * 56}{_ANSI_RESET}")
+    logger.info(f"  {_ANSI_GREEN}✓{_ANSI_RESET} With results: {stats['ok']}  │  {_ANSI_DIM}Empty: {stats['empty']}{_ANSI_RESET}  │  {_ANSI_RED if stats['fail'] else _ANSI_DIM}Failed: {stats['fail']}{_ANSI_RESET}")
+    logger.info(f"  {_ANSI_CYAN}📄{_ANSI_RESET} Raw rows: {stats['total_rows']}  →  After dedup: {_ANSI_BOLD}{len(merged)}{_ANSI_RESET}")
+    logger.info(f"  {_ANSI_CYAN}💾{_ANSI_RESET} Saved: {config.JOBS_CSV}")
+    logger.info(f"  {_ANSI_CYAN}⏱ {_ANSI_RESET} Time: {elapsed:.1f}s ({elapsed / 60:.1f} min)")
+    logger.info(f"{_ANSI_BOLD}{'─' * 56}{_ANSI_RESET}\n")

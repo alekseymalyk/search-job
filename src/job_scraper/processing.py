@@ -7,57 +7,16 @@ and ranks jobs by relevance.
 
 import re
 from collections import Counter
-from difflib import SequenceMatcher
+from rapidfuzz import fuzz
 from pathlib import Path
 
 import pandas as pd
 
 from job_scraper import config
 from job_scraper.query_parser import ParsedQuery
+from job_scraper.ai_enrichment import enrich_jobs_dataframe
 
-# ───────────────── BLOCKLISTS & PATTERNS ─────────────────
-
-REQUIRE_NONEMPTY_DESCRIPTION = True
-
-DESC_BLOCK_PATTERNS = [
-    "traineeship", "internship", "bedrijf", "vergelijkbare", "leuk", "afgeronde",
-    "ontwikkeling", "bieden", "minimaal", "houdt", "ontdekken", "voorbereid",
-    "ben j", "aufgaben", "werken", "zakelijk", "EU citizenship",
-    "inimum 3", "inimum 4", "inimum 5", "inimum 6", "inimum 7", "inimum 8",
-    "für", "jij", "Tu es", "3-5", "Une", "-10", "5+",
-    "Dutch and English", "English and Dutch",
-]
-
-TITLE_BLOCK_PATTERNS = [
-    "intern", "internship", "trainee", "traineeship",
-    "part-time", "part time", "für", "senior", "medior",
-]
-
-LOCATION_BLOCK_PATTERNS = ["germany"]
-
-LOW_SKILL_TITLE_PATTERNS = [
-    "barista", "waiter", "waitress", "server", "hospitality",
-    "kitchen", "cook", "chef", "dishwasher",
-    "retail", "cashier", "shop assistant", "store assistant",
-    "cleaner", "cleaning", "housekeeping", "janitor",
-    "security guard", "security officer",
-    "courier", "delivery driver", "driver", "chauffeur",
-    "warehouse", "order picker", "picker", "packer", "loader", "unloader",
-    "forklift", "heftruck",
-]
-
-NON_BUSINESS_PATTERNS = [
-    "engineer", "engineering", "electrician", "mechanic", "technician",
-    "maintenance", "installer", "construction", "carpenter", "plumber",
-    "welder", "machinist", "operator", "cnc",
-    "nurse", "nursing", "doctor", "physician", "clinical", "pharmac",
-    "dentist", "therapist", "radiology", "midwife", "caregiver",
-    "teacher", "lecturer", "professor",
-    "lawyer", "attorney", "jurist", "notary",
-    "offshore", "drilling", "maritime", "seafarer", "shipyard", "vessel",
-]
-
-ALL_BLOCK_LISTS = [LOW_SKILL_TITLE_PATTERNS, NON_BUSINESS_PATTERNS]
+# ── Constants from config are used directly ──
 
 EXP_REQUIRED_PATTERNS = [
     re.compile(r"\b(minimum|min\.|at\s+least|atleast|a\s+minimum\s+of)\s*(\d{1,2})\s*(\+|plus)?\s*(years?|yrs?|jaar)\b", re.I),
@@ -105,18 +64,26 @@ def requires_2plus_years(description: str) -> bool:
                     continue
     return False
 
+# Precompile regexes
+RE_COMPANY_NORM = re.compile(r"[&/_,\-\.\(\)\[\]\{\}\|:+]")
+RE_TITLE_NORM_1 = re.compile(r"\(.*?\)")
+RE_TITLE_NORM_2 = re.compile(r"\b(m\/f\/d|m\/v\/x|m\/f|f\/m|jr\.?|junior|associate|entry[-\s]?level)\b")
+RE_TITLE_NORM_3 = re.compile(r"[^a-z0-9\s]")
+RE_TOKENIZE_1 = re.compile(r"[^a-z0-9\s]")
+RE_SPACES = re.compile(r"\s+")
+
 def normalize_company(name: str) -> str:
-    s = re.sub(r"[&/_,\-\.\(\)\[\]\{\}\|:+]", " ", str(name).lower())
-    s = re.sub(r"\s+", " ", s).strip()
+    s = RE_COMPANY_NORM.sub(" ", str(name).lower())
+    s = RE_SPACES.sub(" ", s).strip()
     return " ".join(t for t in s.split() if t not in LEGAL_STOPWORDS and len(t) > 1)
 
 def normalize_title(title: str) -> str:
-    t = re.sub(r"\(.*?\)", " ", str(title).lower())
-    t = re.sub(r"\b(m\/f\/d|m\/v\/x|m\/f|f\/m|jr\.?|junior|associate|entry[-\s]?level)\b", " ", t)
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", t)).strip()
+    t = RE_TITLE_NORM_1.sub(" ", str(title).lower())
+    t = RE_TITLE_NORM_2.sub(" ", t)
+    return RE_SPACES.sub(" ", RE_TITLE_NORM_3.sub(" ", t)).strip()
 
 def seq_ratio(a: str, b: str) -> float:
-    return SequenceMatcher(None, a or "", b or "").ratio()
+    return fuzz.ratio(a or "", b or "") / 100.0
 
 def token_overlap(a: str, b: str) -> float:
     ta, tb = set((a or "").split()), set((b or "").split())
@@ -134,7 +101,7 @@ def best_match_company(company_raw: str, applied_map: dict) -> tuple[str, float]
     return best_raw, best_score
 
 def tokenize(text: str) -> list[str]:
-    t = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", str(text).lower())).strip()
+    t = RE_SPACES.sub(" ", RE_TOKENIZE_1.sub(" ", str(text).lower())).strip()
     allowed_short = {"3d", "2d", "ui", "ux", "qa", "ai", "pr"}
     return [w for w in t.split() if (len(w) >= 3 or w in allowed_short) and w not in STOPWORDS]
 
@@ -177,99 +144,179 @@ def _find_col(df: pd.DataFrame, options: list[str]) -> str:
 
 # ───────────────── PROCESSING PIPELINE ─────────────────
 
-def process_jobs(parsed: ParsedQuery = None) -> None:
+def process_jobs(parsed: ParsedQuery = None, task_id: str = None) -> None:
     """Main function that filters and ranks jobs."""
+    import logging
+    from job_scraper.logger import get_task_logger
+    logger = get_task_logger(task_id) if task_id else logging.getLogger(__name__)
+
+    # Default columns to write if empty
+    empty_cols = ["company", "position", "location", "url", "description", "source"]
+
     if not config.JOBS_CSV.exists():
-        print(f"Missing input: {config.JOBS_CSV}")
+        logger.info(f"Missing input: {config.JOBS_CSV}")
+        pd.DataFrame(columns=empty_cols).to_csv(config.FINAL_CSV, index=False)
         return
 
-    jobs = pd.read_csv(config.JOBS_CSV)
+    try:
+        jobs = pd.read_csv(config.JOBS_CSV)
+    except pd.errors.EmptyDataError:
+        logger.info("Jobs CSV has no columns to parse. Skipping processing.")
+        pd.DataFrame(columns=empty_cols).to_csv(config.FINAL_CSV, index=False)
+        return
+
+    if jobs.empty:
+        logger.info("Jobs CSV is empty. Skipping processing.")
+        pd.DataFrame(columns=empty_cols).to_csv(config.FINAL_CSV, index=False)
+        return
+
+    # Normalize basic columns to prevent KeyError
+    for col in ["position", "description", "location", "company", "url"]:
+        if col not in jobs.columns:
+            jobs[col] = ""
+    jobs["position"] = jobs["position"].fillna("").astype(str)
+    jobs["description"] = jobs["description"].fillna("").astype(str)
+    jobs["location"] = jobs["location"].fillna("").astype(str)
+    jobs["company"] = jobs["company"].fillna("").astype(str)
 
     # 1. Hard Reject Filter
-    print(f"\n\033[1m  ▸ Stage: Filtering & Sponsor check...\033[0m")
+    logger.info("  ▸ Stage: Filtering & Sponsor check...")
     
-    sponsor_names = []
+    sponsor_map = {}  # {normalized_name: raw_name}
     if Path(config.SPONSORS_CSV).exists():
-        sponsors = pd.read_csv(config.SPONSORS_CSV)
-        sponsor_names = sponsors.iloc[:, 0].dropna().astype(str).tolist()
+        try:
+            sponsors = pd.read_csv(config.SPONSORS_CSV)
+            raw_names = sponsors.iloc[:, 0].dropna().astype(str).tolist()
+            sponsor_map = {
+                normalize_company(name): name
+                for name in raw_names
+                if name and name.lower() != "nan"
+            }
+        except pd.errors.EmptyDataError:
+            pass
 
-    kept: list[dict] = []
-    reject_counts: Counter = Counter()
+    # Pre-compile filters for vectorization where possible
+    def contains_any_re(patterns):
+        if not patterns: return None
+        escaped = [re.escape(p) for p in patterns]
+        # Use non-capturing group (?:...) to avoid pandas UserWarning
+        return re.compile("(?i)(?:" + "|".join(escaped) + ")")
 
-    for _, row in jobs.iterrows():
-        title, desc, loc, comp, url = [
-            str(row.get(c, "")) for c in ["position", "description", "location", "company", "url"]
-        ]
+    title_block_re = contains_any_re(config.TITLE_BLOCK_PATTERNS)
+    all_block_lists_re = [contains_any_re(p) for p in config.ALL_BLOCK_LISTS if p]
+    loc_block_re = contains_any_re(config.LOCATION_BLOCK_PATTERNS)
+    desc_block_re = contains_any_re(config.DESC_BLOCK_PATTERNS)
 
-        if REQUIRE_NONEMPTY_DESCRIPTION and not is_nonempty(desc):
-            reject_counts["desc_empty"] += 1; continue
-        if contains_any(TITLE_BLOCK_PATTERNS, title):
-            reject_counts["title_block"] += 1; continue
-        if any(contains_any(p, title) for p in ALL_BLOCK_LISTS):
-            reject_counts["title_non_business"] += 1; continue
-        if contains_any(LOCATION_BLOCK_PATTERNS, loc):
-            reject_counts["location_block"] += 1; continue
-        if contains_any(DESC_BLOCK_PATTERNS, desc):
-            reject_counts["desc_block"] += 1; continue
-        if requires_2plus_years(desc):
-            reject_counts["exp_2plus"] += 1; continue
+    reject_counts = Counter()
+
+    # Vectorized fast filters
+    mask_keep = pd.Series(True, index=jobs.index)
+    
+    if config.REQUIRE_NONEMPTY_DESCRIPTION:
+        empty_mask = jobs["description"].str.strip() == ""
+        reject_counts["desc_empty"] += empty_mask.sum()
+        mask_keep &= ~empty_mask
+
+    if title_block_re:
+        tb_mask = jobs["position"].str.contains(title_block_re.pattern, regex=True, flags=re.IGNORECASE)
+        reject_counts["title_block"] += tb_mask.sum()
+        mask_keep &= ~tb_mask
+
+    for abl_re in all_block_lists_re:
+        if abl_re:
+            abl_mask = jobs["position"].str.contains(abl_re.pattern, regex=True, flags=re.IGNORECASE)
+            reject_counts["title_non_business"] += abl_mask.sum()
+            mask_keep &= ~abl_mask
+
+    if loc_block_re:
+        lb_mask = jobs["location"].str.contains(loc_block_re.pattern, regex=True, flags=re.IGNORECASE)
+        reject_counts["location_block"] += lb_mask.sum()
+        mask_keep &= ~lb_mask
+
+    if desc_block_re:
+        db_mask = jobs["description"].str.contains(desc_block_re.pattern, regex=True, flags=re.IGNORECASE)
+        reject_counts["desc_block"] += db_mask.sum()
+        mask_keep &= ~db_mask
+
+    # Strict title/remote filters
+    if parsed and parsed.job_title:
+        expected_tokens = set(tokenize(parsed.job_title))
+        if expected_tokens:
+            def match_title(title):
+                return bool(expected_tokens & set(tokenize(title)))
+            title_match_mask = jobs["position"].apply(match_title)
+            reject_counts["irrelevant_title"] += (~title_match_mask).sum()
+            mask_keep &= title_match_mask
+
+    if parsed and parsed.remote:
+        not_remote_mask = (
+            jobs["location"].str.lower().str.contains(r"on-site|onsite|hybrid", regex=True) |
+            jobs["position"].str.lower().str.contains(r"on-site|hybrid", regex=True)
+        )
+        reject_counts["not_remote"] += not_remote_mask.sum()
+        mask_keep &= ~not_remote_mask
+
+    # Experience Level check
+    is_junior_search = False
+    if parsed and parsed.job_title:
+        jt_low = parsed.job_title.lower()
+        if "junior" in jt_low or "jr" in jt_low or "entry" in jt_low:
+            is_junior_search = True
             
-        # Strict job title validation if user specified a title
-        if parsed and parsed.job_title:
-            expected_tokens = set(tokenize(parsed.job_title))
-            title_tokens = set(tokenize(title))
-            # At least one important word from the searched title should be in the returned title
-            if expected_tokens and not (expected_tokens & title_tokens):
-                reject_counts["irrelevant_title"] += 1; continue
+    if is_junior_search:
+        exp_mask = jobs["description"].apply(requires_2plus_years)
+        reject_counts["exp_too_high"] += exp_mask.sum()
+        mask_keep &= ~exp_mask
 
-        # Strict remote validation
-        if parsed and parsed.remote:
-            loc_lower = loc.lower()
-            desc_lower = desc.lower()
-            title_lower = title.lower()
-            # Reject if it explicitly says on-site or hybrid in title/location
-            if "on-site" in loc_lower or "onsite" in loc_lower or "hybrid" in loc_lower or "on-site" in title_lower or "hybrid" in title_lower:
-                reject_counts["not_remote"] += 1; continue
+    # Apply fast filters
+    df = jobs[mask_keep].copy()
 
-        sp_name, sp_score = best_match_company(comp, sponsor_names) if sponsor_names else ("", 1.0)
+    # Apply slow filters (sponsor match & scoring) only on remaining
+    if not df.empty:
+        def process_row(row):
+            comp = str(row["company"])
+            title_l = str(row["position"]).lower()
+            desc_l = str(row["description"]).lower()
+            
+            sp_name, sp_score = best_match_company(comp, sponsor_map) if sponsor_map else ("", 1.0)
+            
+            score = sp_score * 10.0
+            for keyword, boost in config.TITLE_BOOSTS.items():
+                if keyword in title_l:
+                    score += boost
+            for keyword, boost in config.DESC_BOOSTS.items():
+                if keyword in desc_l:
+                    score += boost
+                    
+            return pd.Series({
+                "sponsor_match": sp_name,
+                "sponsor_score": round(sp_score, 3),
+                "rank_score": round(score, 2)
+            })
+
+        new_cols = df.apply(process_row, axis=1)
+        df = pd.concat([df, new_cols], axis=1)
         
-        # If sponsor matching is strictly needed and score < threshold, reject
-        # We assume if SPONSORS_CSV exists, we only want sponsors (like previous stage1 logic).
-        if sponsor_names and sp_score < config.SPONSOR_MATCH_THRESHOLD:
-            reject_counts["sponsor_miss"] += 1; continue
+        if sponsor_map:
+            sponsor_miss_mask = df["sponsor_score"] < config.SPONSOR_MATCH_THRESHOLD
+            reject_counts["sponsor_miss"] += sponsor_miss_mask.sum()
+            df = df[~sponsor_miss_mask].copy()
 
-        score = sp_score * 10.0
-        t, d = title.lower(), desc.lower()
-        if "analyst" in t: score += 1.5
-        if "operations" in t or "operational" in t: score += 1.0
-        if "implementation" in t or "onboarding" in t: score += 1.0
-        if "account" in t: score += 0.75
-        if any(x in t for x in ["commercial", "sales"]): score += 0.5
-        if any(x in d for x in ["€", "eur", "salary"]): score += 0.5
-
-        kept.append({
-            "company": comp, "position": title, "location": loc,
-            "url": url, "description": desc,
-            "sponsor_match": sp_name, "sponsor_score": round(sp_score, 3),
-            "rank_score": round(score, 2),
-        })
-
-    print("Rejections:")
+    logger.info("Rejections:")
     for reason, count in reject_counts.most_common():
-        print(f"  {reason}: {count}")
+        if count > 0:
+            logger.info(f"  {reason}: {count}")
 
-    if not kept:
+    if df.empty:
         pd.DataFrame().to_csv(config.FINAL_CSV, index=False)
-        print(f"Saved 0 jobs to {config.FINAL_CSV}")
+        logger.info(f"Saved 0 jobs to {config.FINAL_CSV}")
         return
 
-    df = pd.DataFrame(kept)
-
     # 2. Ranking against applied history
-    print(f"\033[1m  ▸ Stage: Ranking against history...\033[0m")
+    logger.info("  ▸ Stage: Ranking against history...")
     if Path(config.APPLIED_FILE).exists():
         applied = pd.read_csv(config.APPLIED_FILE)
-        a_comp_col = _find_col(applied, ["Company ", "Company", "company", "Employer"])
+        a_comp_col = _find_col(applied, ["Company", "company", "Employer"])
         a_pos_col = _find_col(applied, ["Position", "position", "Title", "Job Title"])
         a_desc_col = _find_col(applied, ["Description", "description", "Job Description"])
 
@@ -281,41 +328,59 @@ def process_jobs(parsed: ParsedQuery = None) -> None:
         applied_titles = applied[a_pos_col].dropna().astype(str).map(normalize_title).tolist()
         kw_profile = build_keyword_profile(applied[a_desc_col], top_k=300)
 
-        results = []
-        for _, r in df.iterrows():
-            comp, pos, desc = [str(r.get(c, "")) for c in ["company", "position", "description"]]
-            base = float(r.get("rank_score", 0) or 0)
+        # Batch scoring
+        df["applied_company_match"] = ""
+        df["applied_company_score"] = 0.0
+        df["applied_company_boost"] = 0.0
+        df["applied_title_similarity"] = 0.0
+        df["applied_title_boost"] = 0.0
+        df["applied_keyword_overlap"] = 0.0
+        df["applied_keyword_boost"] = 0.0
+        df["final_rank_score"] = df["rank_score"]
 
-            m_name, m_score = best_match_company(comp, applied_map)
-            c_boost = W_COMPANY * (1.0 if m_score >= 0.9 else 0.66 if m_score >= 0.8 else 0.33 if m_score >= 0.7 else 0.0)
+        # Only process if we actually have history
+        if applied_map or applied_titles or kw_profile:
+            def score_row(row):
+                comp, pos, desc = str(row["company"]), str(row["position"]), str(row["description"])
+                m_name, m_score = best_match_company(comp, applied_map) if applied_map else ("", 0.0)
+                c_boost = W_COMPANY * (1.0 if m_score >= 0.9 else 0.66 if m_score >= 0.8 else 0.33 if m_score >= 0.7 else 0.0)
 
-            ts = best_title_similarity(pos, applied_titles)
-            t_boost = W_TITLE * (1.0 if ts >= 0.9 else 0.66 if ts >= 0.8 else 0.33 if ts >= 0.7 else 0.0)
+                ts = best_title_similarity(pos, applied_titles) if applied_titles else 0.0
+                t_boost = W_TITLE * (1.0 if ts >= 0.9 else 0.66 if ts >= 0.8 else 0.33 if ts >= 0.7 else 0.0)
 
-            ko = keyword_overlap_score(desc, kw_profile)
-            k_boost = W_KEYWORDS * (1.0 if ko >= 0.08 else 0.66 if ko >= 0.05 else 0.33 if ko >= 0.03 else 0.0)
+                ko = keyword_overlap_score(desc, kw_profile) if kw_profile else 0.0
+                k_boost = W_KEYWORDS * (1.0 if ko >= 0.08 else 0.66 if ko >= 0.05 else 0.33 if ko >= 0.03 else 0.0)
 
-            r["applied_company_match"] = m_name
-            r["applied_company_score"] = round(m_score, 3)
-            r["applied_company_boost"] = round(c_boost, 2)
-            r["applied_title_similarity"] = round(ts, 3)
-            r["applied_title_boost"] = round(t_boost, 2)
-            r["applied_keyword_overlap"] = round(ko, 4)
-            r["applied_keyword_boost"] = round(k_boost, 2)
-            r["final_rank_score"] = round(base + c_boost + t_boost + k_boost, 2)
-            results.append(r)
-        
-        df = pd.DataFrame(results)
+                return pd.Series({
+                    "applied_company_match": m_name,
+                    "applied_company_score": round(m_score, 3),
+                    "applied_company_boost": round(c_boost, 2),
+                    "applied_title_similarity": round(ts, 3),
+                    "applied_title_boost": round(t_boost, 2),
+                    "applied_keyword_overlap": round(ko, 4),
+                    "applied_keyword_boost": round(k_boost, 2),
+                    "final_rank_score": round(row["rank_score"] + c_boost + t_boost + k_boost, 2)
+                })
+
+            updates = df.apply(score_row, axis=1)
+            df.update(updates)
     else:
-        # If no applied file, final score is just the base rank score
         df["final_rank_score"] = df["rank_score"]
 
     df = df.sort_values("final_rank_score", ascending=False)
     
-    # Slice by requested count (or fallback to a large number like 5000 if not specified)
     limit = parsed.count if (parsed and parsed.count > 0) else 5000
     df = df.head(limit)
 
+    # 3. AI Enrichment (Process only top N to save tokens/time)
+    if config.ENABLE_AI_ENRICHMENT and config.OPENAI_API_KEY:
+        logger.info(f"  ▸ Stage: AI Enrichment for top {min(len(df), config.AI_MAX_JOBS)} jobs...")
+        top_df = df.head(config.AI_MAX_JOBS).copy()
+        bottom_df = df.iloc[config.AI_MAX_JOBS:].copy()
+        
+        top_df = enrich_jobs_dataframe(top_df, logger)
+        df = pd.concat([top_df, bottom_df], ignore_index=True)
+
     config.FINAL_CSV.parent.mkdir(exist_ok=True)
     df.to_csv(config.FINAL_CSV, index=False)
-    print(f"Saved: {config.FINAL_CSV} (rows: {len(df)})")
+    logger.info(f"Saved: {config.FINAL_CSV} (rows: {len(df)})")

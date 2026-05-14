@@ -13,14 +13,16 @@ import json
 import logging
 import threading
 import webbrowser
+import uuid
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, send_file
+from flask import Flask, Response, jsonify, send_file, render_template, request
 
 from job_scraper import config
 from job_scraper.query_parser import parse_query
 from job_scraper.scraper import run_scraper
 from job_scraper.processing import process_jobs
+from job_scraper.logger import setup_task_logger
 
 # Suppress Flask/Werkzeug access logs (GET /status etc.)
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
@@ -28,530 +30,552 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 app = Flask(__name__)
 
 # ── shared state for progress tracking ──
-_state = {
-    "status": "idle",       # idle | running | done | error
-    "progress": [],         # list of log messages
-    "result_count": 0,
-    "error": "",
-}
+_logs_dict = {}
+_state_dict = {}  # {task_id: {"status": "idle", "result_count": 0, "error": ""}}
+_task_order = []  # track insertion order for cleanup
+_cancel_flags = set()
 _state_lock = threading.Lock()
+_MAX_STORED_TASKS = 50
 
 
-def _reset_state():
+def _cleanup_old_tasks():
+    """Remove oldest tasks when exceeding the storage limit."""
     with _state_lock:
-        _state["status"] = "idle"
-        _state["progress"] = []
-        _state["result_count"] = 0
-        _state["error"] = ""
+        while len(_task_order) > _MAX_STORED_TASKS:
+            old_id = _task_order.pop(0)
+            _state_dict.pop(old_id, None)
+            _logs_dict.pop(old_id, None)
+            _cancel_flags.discard(old_id)
 
 
-def _set_status(status, **kwargs):
+def _init_task(task_id):
     with _state_lock:
-        _state["status"] = status
+        _state_dict[task_id] = {
+            "status": "running",
+            "result_count": 0,
+            "error": "",
+        }
+        _logs_dict[task_id] = []
+        _task_order.append(task_id)
+    _cleanup_old_tasks()
+
+
+def _set_status(task_id, status, **kwargs):
+    with _state_lock:
+        if task_id not in _state_dict:
+            _state_dict[task_id] = {}
+        _state_dict[task_id]["status"] = status
         for k, v in kwargs.items():
-            _state[k] = v
-
-
-def _add_progress(msg):
-    with _state_lock:
-        _state["progress"].append(msg)
+            _state_dict[task_id][k] = v
 
 
 # ── HTML page (embedded for zero-config) ──
 
-HTML_PAGE = r"""<!DOCTYPE html>
-<html lang="uk">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Job Scraper — Minimal</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#000000;
-  --surface:#0a0a0a;
-  --surface-hover:#141414;
-  --border:#222;
-  --border-focus:#444;
-  --text:#ffffff;
-  --text-muted:#888888;
-  --accent:#ffffff;
-  --green:#34d399;
-  --red:#f87171;
-  --radius:8px;
-  --font:'JetBrains Mono', monospace;
-  --transition: 0.3s ease;
-}
-html{font-size:14px; scroll-behavior: smooth;}
-body{
-  font-family:var(--font);background:var(--bg);color:var(--text);
-  min-height:100vh;display:flex;flex-direction:column;align-items:center;
-  padding:3rem 1rem;
-}
-::selection { background: var(--text); color: var(--bg); }
-
-/* Layout & Typography */
-h1{font-size:1.5rem;font-weight:700;margin-bottom:0.5rem;letter-spacing:-0.05em;}
-.subtitle{color:var(--text-muted);font-size:0.9rem;margin-bottom:3rem;}
-
-.container { width: 100%; max-width: 800px; display: flex; flex-direction: column; gap: 2rem; }
-
-/* Cards */
-.card{
-  background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--radius);padding:2rem;
-  transition: transform var(--transition), border-color var(--transition), box-shadow var(--transition);
-  animation: fade-in 0.6s ease-out forwards;
-}
-.card:hover { border-color: var(--border-focus); }
-.card h2{font-size:1rem;font-weight:500;margin-bottom:1.5rem;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-muted);}
-
-@keyframes fade-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-/* Forms & Inputs */
-textarea{
-  width:100%;min-height:120px;background:var(--bg);border:1px solid var(--border);
-  border-radius:var(--radius);padding:1rem;color:var(--text);
-  font-family:var(--font);font-size:0.9rem;line-height:1.5;
-  resize:vertical;outline:none;transition: border-color var(--transition), box-shadow var(--transition);
-}
-textarea:focus{border-color:var(--text);box-shadow: 0 0 0 1px var(--text);}
-textarea::placeholder{color:var(--text-muted);}
-
-.settings{display:flex;gap:1.5rem;margin-top:1.5rem;align-items:center;font-size:0.9rem;}
-.settings label{display:flex;align-items:center;gap:0.5rem;color:var(--text-muted);}
-.settings input[type=number]{
-  width:60px;background:var(--bg);border:1px solid var(--border);
-  border-radius:4px;padding:0.4rem;color:var(--text);font-family:var(--font);
-  outline:none;text-align:center;transition: border-color var(--transition);
-}
-.settings input[type=number]:focus { border-color: var(--text); }
-
-/* Buttons */
-.btn{
-  display:inline-flex;align-items:center;justify-content:center;gap:0.5rem;
-  padding:0.8rem 1.5rem;border-radius:var(--radius);border:1px solid var(--border);
-  font-family:var(--font);font-size:0.9rem;font-weight:500;cursor:pointer;
-  background:var(--bg);color:var(--text);transition: all var(--transition);
-  margin-top:1.5rem; text-transform: uppercase; letter-spacing: 0.05em;
-}
-.btn:hover:not(:disabled){ background:var(--text); color:var(--bg); }
-.btn:disabled{opacity:0.5;cursor:not-allowed;}
-.btn-primary { background: var(--text); color: var(--bg); border-color: var(--text); }
-.btn-primary:hover:not(:disabled) { background: var(--bg); color: var(--text); }
-.btn-download{
-  background:transparent;color:var(--green);border-color:var(--green);
-  text-decoration:none;margin-top:0;
-}
-.btn-download:hover{background:var(--green);color:var(--bg);}
-
-/* Presets */
-.presets{display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:1rem;}
-.preset{
-  background:transparent;border:1px solid var(--border);border-radius:20px;
-  padding:0.3rem 0.8rem;font-size:0.8rem;color:var(--text-muted);
-  cursor:pointer;transition:all 0.2s;
-}
-.preset:hover{border-color:var(--text);color:var(--text);}
-
-/* Progress & Loading */
-.progress-container{display:none;}
-.progress-container.active{display:block; animation: fade-in 0.4s ease-out;}
-.progress-track{
-  height:2px;background:var(--border);border-radius:2px;
-  overflow:hidden;margin:1rem 0;position:relative;
-}
-.progress-fill{
-  height:100%;width:0%;background:var(--text);
-  transition:width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.progress-text{font-size:0.85rem;color:var(--text-muted);display:flex;justify-content:space-between;}
-
-.spinner{
-  display:inline-block;width:14px;height:14px;
-  border:2px solid var(--border);border-top-color:var(--text);
-  border-radius:50%;animation:spin 0.8s linear infinite;
-}
-.spinner.inverse { border-top-color: var(--bg); border-color: rgba(0,0,0,0.2); }
-@keyframes spin{to{transform:rotate(360deg)}}
-
-/* Terminal Log */
-.log{
-  background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
-  padding:1rem;max-height:200px;overflow-y:auto;font-size:0.8rem;
-  color:var(--text-muted);margin-top:1.5rem;line-height:1.6;
-  display:none;
-}
-.log.active{display:block; animation: fade-in 0.4s ease-out;}
-.log .ok{color:var(--green);}
-.log .err{color:var(--red);}
-.log .info{color:var(--text);}
-.log-line { border-left: 2px solid transparent; padding-left: 0.5rem; margin-bottom: 0.2rem; }
-.log-line:hover { background: var(--surface-hover); border-left-color: var(--border-focus); }
-
-/* Results Table */
-.results{display:none;}
-.results.active{display:block; animation: fade-in 0.6s ease-out;}
-.results-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem;}
-.badge{background:var(--surface-hover);border:1px solid var(--border);padding:0.2rem 0.6rem;border-radius:4px;font-size:0.8rem;font-weight:500;}
-
-.table-wrap{overflow-x:auto; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg);}
-table{width:100%;border-collapse:collapse;font-size:0.85rem;}
-th{
-  background:var(--surface);color:var(--text-muted);padding:1rem;
-  text-align:left;font-weight:500;text-transform:uppercase;letter-spacing:0.05em;
-  border-bottom:1px solid var(--border);
-}
-td{padding:1rem;border-bottom:1px solid var(--border);vertical-align:top; color:var(--text);}
-tr:last-child td { border-bottom: none; }
-tr:hover td{background:var(--surface-hover);}
-td a{color:var(--text);text-decoration:underline;text-underline-offset:4px;}
-td a:hover{color:var(--text-muted);}
-.desc-cell{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);}
-
-/* Parsed Data */
-.parsed-card { display: none; }
-.parsed-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 1rem; }
-.parsed-item { background: var(--bg); padding: 1rem; border-radius: var(--radius); border: 1px solid var(--border); }
-.parsed-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 0.5rem; }
-.parsed-value { font-size: 0.9rem; font-weight: 500; }
-
-/* Charts */
-.analytics-card { display: none; }
-.analytics-card.active { display: block; animation: fade-in 0.6s ease-out; }
-.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 1.5rem; }
-.chart-section h3 { font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 1rem; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
-.chart-row { display: flex; align-items: center; margin-bottom: 0.6rem; }
-.chart-label { width: 120px; font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chart-bar-bg { flex-grow: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 0 1rem; position: relative; }
-.chart-bar-fill { height: 100%; background: var(--text); border-radius: 3px; width: 0%; transition: width 1s cubic-bezier(0.4, 0, 0.2, 1); }
-.chart-val { font-size: 0.8rem; font-weight: 500; width: 30px; text-align: right; }
-@media(max-width:800px){ .chart-grid { grid-template-columns: 1fr; } }
-
-/* Custom Scrollbar */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: var(--border-focus); }
-
-@media(max-width:600px){
-  body{padding:1.5rem 0.5rem;}
-  .card{padding:1.5rem;}
-  .settings{flex-direction:column;align-items:flex-start;}
-}
-</style>
-</head>
-<body>
-
-<div class="container">
-  <header>
-    <h1>> Job Scraper</h1>
-    <p class="subtitle">Automated recruitment targeting. Defined by natural language.</p>
-  </header>
-
-  <!-- SEARCH CARD -->
-  <div class="card">
-    <h2>01 // Query Setup</h2>
-    <textarea id="query" placeholder="Describe the roles you are looking for.&#10;&#10;e.g. 'find 50 companies hiring 3D artists, remote in EU/US, max 2 weeks old.'"></textarea>
-
-    <div class="presets">
-      <span class="preset" onclick="setPreset('3D artist')">3D Artist</span>
-      <span class="preset" onclick="setPreset('data analyst')">Data Analyst</span>
-      <span class="preset" onclick="setPreset('product manager')">Product Manager</span>
-      <span class="preset" onclick="setPreset('python developer')">Python Dev</span>
-      <span class="preset" onclick="setPreset('UX designer')">UX Designer</span>
-    </div>
-
-    <div class="settings">
-      <label>Threads: <input type="number" id="workers" value="3" min="1" max="10"></label>
-    </div>
-
-    <button class="btn btn-primary" id="searchBtn" onclick="startSearch()">
-      Initialize Search
-    </button>
-  </div>
-
-  <!-- PARSED QUERY CARD -->
-  <div class="card parsed-card" id="parsedCard">
-    <h2>02 // Parameter Extraction</h2>
-    <div class="parsed-grid" id="parsedInfo"></div>
-  </div>
-
-  <!-- PROGRESS CARD -->
-  <div class="card progress-container" id="progressCard">
-    <h2>03 // Execution Status</h2>
-    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
-    <div class="progress-text">
-      <span id="progressLabel">Connecting...</span>
-      <span id="progressCount">0%</span>
-    </div>
-    <div class="log" id="logBox"></div>
-  </div>
-
-  <!-- RESULTS CARD -->
-  <div class="card results" id="resultsCard">
-    <div class="results-header">
-      <h2>04 // Acquired Targets</h2>
-      <div style="display:flex; gap:1rem; align-items:center;">
-        <span class="badge" id="resultCount">0 matches</span>
-        <a class="btn btn-download" href="/download" id="downloadBtn">Export CSV</a>
-      </div>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr><th>Company</th><th>Role</th><th>Location</th><th>Context</th><th>Link</th></tr>
-        </thead>
-        <tbody id="resultsBody"></tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- ANALYTICS CARD -->
-  <div class="card analytics-card" id="analyticsCard">
-    <h2>05 // Data Insights & Salary Analysis</h2>
-    <div class="chart-grid" id="analyticsGrid">
-      <!-- Injected via JS -->
-    </div>
-  </div>
-</div>
-
-<script>
-const $ = id => document.getElementById(id);
-
-function setPreset(job) {
-  const q = $('query');
-  q.value = `find 50 companies hiring ${job}, remote in EU, US, Canada. last 2 weeks.`;
-  q.focus();
-}
-
-let pollTimer = null;
-
-async function startSearch() {
-  const query = $('query').value.trim();
-  if (!query) return;
-
-  const workers = parseInt($('workers').value) || 3;
-
-  // UI state transition
-  const btn = $('searchBtn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner inverse"></span> Processing...';
-  
-  $('progressCard').classList.add('active');
-  $('resultsCard').classList.remove('active');
-  $('analyticsCard').classList.remove('active');
-  $('parsedCard').style.display = 'none';
-  $('logBox').innerHTML = '';
-  $('logBox').classList.remove('active');
-  $('progressFill').style.width = '0%';
-  $('progressLabel').textContent = 'Authenticating request...';
-  $('progressCount').textContent = '0 / ?';
-
-  // Smooth scroll
-  $('progressCard').scrollIntoView({behavior: 'smooth', block: 'nearest'});
-
-  try {
-    const res = await fetch('/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, workers })
-    });
-    const data = await res.json();
-
-    if (data.parsed) {
-      showParsed(data.parsed);
-    }
-
-    $('progressLabel').textContent = 'Initiating web drivers...';
-    $('logBox').classList.add('active');
-    pollTimer = setInterval(pollStatus, 800);
-  } catch (e) {
-    $('progressLabel').textContent = 'ERR: ' + e.message;
-    resetBtn();
-  }
-}
-
-function showParsed(p) {
-  $('parsedCard').style.display = 'block';
-  $('parsedInfo').innerHTML = `
-    <div class="parsed-item"><div class="parsed-label">Role</div><div class="parsed-value">${esc(p.job_title || 'Any')}</div></div>
-    <div class="parsed-item"><div class="parsed-label">Target Count</div><div class="parsed-value">${p.count}</div></div>
-    <div class="parsed-item"><div class="parsed-label">Remote</div><div class="parsed-value">${p.remote ? 'Required' : 'Any'}</div></div>
-    <div class="parsed-item"><div class="parsed-label">Region</div><div class="parsed-value">${p.locations.length ? esc(p.locations.join(', ')) : 'Global'}</div></div>
-    <div class="parsed-item"><div class="parsed-label">Max Age</div><div class="parsed-value">${Math.round(p.max_age_hours/24)} days</div></div>
-  `;
-}
-
-async function pollStatus() {
-  try {
-    const res = await fetch('/status');
-    const data = await res.json();
-    const log = $('logBox');
-
-    if (data.progress && data.progress.length) {
-      // Only append new lines for better performance and animation if wanted, but full redraw is fine for small logs
-      log.innerHTML = data.progress.map(m => {
-        let cls = 'info';
-        if (m.includes('✓')) cls = 'ok';
-        else if (m.includes('✗') || m.toLowerCase().includes('fail')) cls = 'err';
-        return `<div class="log-line ${cls}">${esc(m)}</div>`;
-      }).join('');
-      log.scrollTop = log.scrollHeight;
-    }
-
-    const total = data.progress.filter(m => m.includes('✓') || m.includes('✗')).length;
-    // Attempt to guess progress based on total logs vs target count. Not perfectly accurate but looks active.
-    let expected = 20; // arbitrary base
-    let countNode = $('parsedInfo').textContent.match(/Target Count\n\s*(\d+)/);
-    if (countNode && countNode[1]) expected = parseInt(countNode[1]);
-    
-    let pct = Math.min(98, Math.max(5, (total / expected) * 100));
-    if (data.status === 'running') {
-       $('progressFill').style.width = pct + '%';
-       $('progressLabel').textContent = 'Extraction in progress...';
-       $('progressCount').textContent = `${total} ops`;
-    }
-
-    if (data.status === 'done') {
-      clearInterval(pollTimer);
-      $('progressFill').style.width = '100%';
-      $('progressLabel').textContent = 'Extraction complete.';
-      $('progressCount').textContent = `Found ${data.result_count}`;
-      if (data.result_count > 0) {
-        loadResults();
-        loadAnalytics();
-      }
-      resetBtn();
-    } else if (data.status === 'error') {
-      clearInterval(pollTimer);
-      $('progressFill').style.background = 'var(--red)';
-      $('progressLabel').textContent = 'Process terminated.';
-      resetBtn();
-    }
-  } catch(e) {}
-}
-
-async function loadResults() {
-  try {
-    const res = await fetch('/results');
-    const jobs = await res.json();
-    const tbody = $('resultsBody');
-
-    $('resultCount').textContent = jobs.length + ' targets found';
-    tbody.innerHTML = jobs.map(j => `
-      <tr>
-        <td>${esc(j.company)}</td>
-        <td style="font-weight:500;">${esc(j.position)}</td>
-        <td style="color:var(--text-muted);">${esc(j.location)}</td>
-        <td class="desc-cell" title="${esc(j.description)}">${esc(j.description?.substring(0, 80) || '')}...</td>
-        <td>${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">Link</a>` : '—'}</td>
-      </tr>
-    `).join('');
-
-    $('resultsCard').classList.add('active');
-    setTimeout(() => {
-        $('resultsCard').scrollIntoView({behavior: 'smooth', block: 'start'});
-    }, 100);
-  } catch(e) {}
-}
-
-async function loadAnalytics() {
-  try {
-    const res = await fetch('/analytics');
-    const data = await res.json();
-    if (!data.total_jobs) return;
-
-    let html = '';
-
-    const renderBars = (title, items, totalMax) => {
-      let block = `<div class="chart-section"><h3>${title}</h3>`;
-      if (!items || Object.keys(items).length === 0) {
-        block += `<div style="font-size:0.8rem; color:var(--text-muted);">No sufficient data.</div>`;
-      } else {
-        const maxVal = Math.max(...Object.values(items), totalMax || 1);
-        for (const [lbl, val] of Object.entries(items)) {
-          const pct = Math.round((val / maxVal) * 100);
-          block += `
-            <div class="chart-row">
-              <div class="chart-label" title="${esc(lbl)}">${esc(lbl)}</div>
-              <div class="chart-bar-bg"><div class="chart-bar-fill" style="width:${pct}%"></div></div>
-              <div class="chart-val">${val}</div>
-            </div>`;
-        }
-      }
-      block += `</div>`;
-      return block;
-    };
-
-    html += renderBars('Top Locations', data.locations);
-    html += renderBars('Top Companies', data.companies);
-    
-    if (data.salaries) {
-      html += renderBars('Est. Salary Distribution', data.salaries);
-    } else {
-      html += `<div class="chart-section"><h3>Est. Salary Distribution</h3><div style="font-size:0.8rem; color:var(--text-muted);">Not enough salary data found in descriptions.</div></div>`;
-    }
-
-    $('analyticsGrid').innerHTML = html;
-    $('analyticsCard').classList.add('active');
-  } catch(e) {
-    console.error(e);
-  }
-}
-
-function resetBtn() {
-  const btn = $('searchBtn');
-  btn.disabled = false;
-  btn.innerHTML = 'Initialize Search';
-}
-
-function esc(s) {
-  if (!s) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-</script>
-</body>
-</html>"""
-
-
-# ── Flask routes ──
-
 @app.route("/")
 def index():
-    return HTML_PAGE
+    return render_template("index.html")
 
+
+# ── Job role taxonomy for smart suggestions ──
+_ROLE_TAXONOMY = {
+    # ═══ TECH / ENGINEERING ═══
+    "AI / Machine Learning": [
+        "AI Engineer", "Machine Learning Engineer", "ML Ops Engineer",
+        "NLP Engineer", "Computer Vision Engineer", "Deep Learning Engineer",
+        "AI Research Scientist", "Prompt Engineer", "AI Product Manager",
+        "Conversational AI Developer", "Robotics Engineer",
+        "AI Trainer", "AI Ethics Specialist", "Generative AI Engineer",
+        "Reinforcement Learning Engineer", "Speech Recognition Engineer",
+    ],
+    "Backend Development": [
+        "Backend Developer", "Python Developer", "Java Developer",
+        "Go Developer", "Node.js Developer", "PHP Developer",
+        "Ruby Developer", "Rust Developer", "C# / .NET Developer",
+        "Scala Developer", "Elixir Developer", "Perl Developer",
+        "API Developer", "Microservices Engineer", "Backend Architect",
+    ],
+    "Frontend Development": [
+        "Frontend Developer", "React Developer", "Angular Developer",
+        "Vue.js Developer", "Svelte Developer", "TypeScript Developer",
+        "UI Developer", "Web Developer", "JavaScript Developer",
+        "Next.js Developer", "Nuxt.js Developer", "Frontend Architect",
+        "Webflow Developer", "WordPress Developer",
+    ],
+    "Full Stack": [
+        "Full Stack Developer", "Full Stack Engineer",
+        "MERN Stack Developer", "MEAN Stack Developer",
+        "Django Full Stack Developer", "Rails Full Stack Developer",
+        "T-Shaped Developer",
+    ],
+    "Mobile Development": [
+        "iOS Developer", "Android Developer", "React Native Developer",
+        "Flutter Developer", "Mobile Engineer", "Swift Developer",
+        "Kotlin Developer", "Xamarin Developer", "Mobile Architect",
+        "Mobile QA Engineer", "Mobile DevOps Engineer",
+    ],
+    "Data & Analytics": [
+        "Data Engineer", "Data Analyst", "Data Scientist",
+        "Business Intelligence Analyst", "BI Developer", "Analytics Engineer",
+        "ETL Developer", "Data Architect", "Database Administrator",
+        "Data Warehouse Engineer", "Data Visualization Specialist",
+        "Power BI Developer", "Tableau Developer", "Looker Developer",
+        "Big Data Engineer", "Hadoop Engineer", "Spark Developer",
+        "Data Governance Analyst", "Data Quality Engineer",
+        "Quantitative Analyst", "Statistical Analyst",
+    ],
+    "DevOps / Cloud / Infrastructure": [
+        "DevOps Engineer", "Site Reliability Engineer", "Cloud Engineer",
+        "Platform Engineer", "Infrastructure Engineer",
+        "AWS Solutions Architect", "AWS Engineer", "Azure Engineer",
+        "GCP Engineer", "Cloud Architect", "Cloud Security Engineer",
+        "Kubernetes Engineer", "Docker Specialist",
+        "Systems Administrator", "Linux Administrator",
+        "Network Engineer", "Network Administrator",
+        "Release Engineer", "Build Engineer", "CI/CD Engineer",
+        "Terraform Engineer", "Ansible Engineer",
+    ],
+    "Cybersecurity": [
+        "Security Engineer", "Cybersecurity Analyst", "Penetration Tester",
+        "Security Architect", "SOC Analyst", "AppSec Engineer",
+        "Information Security Manager", "Security Operations Engineer",
+        "Threat Intelligence Analyst", "Incident Response Analyst",
+        "Cloud Security Specialist", "Compliance Analyst",
+        "Ethical Hacker", "Red Team Operator", "Blue Team Analyst",
+        "GRC Analyst", "CISO", "Identity & Access Management Engineer",
+    ],
+    "QA / Testing": [
+        "QA Engineer", "Test Automation Engineer", "SDET",
+        "Quality Assurance Analyst", "Performance Tester",
+        "QA Lead", "Manual Tester", "Regression Tester",
+        "Test Manager", "Accessibility Tester",
+        "Selenium Engineer", "Cypress Developer",
+        "Load Testing Engineer", "Security Tester",
+    ],
+    "Embedded / IoT / Hardware": [
+        "Embedded Systems Engineer", "Firmware Engineer",
+        "IoT Developer", "FPGA Engineer", "Hardware Engineer",
+        "RTOS Developer", "Embedded C Developer",
+        "PCB Designer", "Electronics Engineer", "Signal Processing Engineer",
+        "Automotive Software Engineer", "Robotics Software Engineer",
+    ],
+    "Blockchain / Web3": [
+        "Blockchain Developer", "Solidity Developer",
+        "Smart Contract Developer", "Web3 Developer",
+        "DeFi Developer", "Crypto Engineer",
+        "NFT Developer", "dApp Developer",
+        "Blockchain Architect", "Token Economist",
+    ],
+    "ERP / Enterprise": [
+        "SAP Developer", "SAP Consultant", "SAP ABAP Developer",
+        "Salesforce Developer", "Salesforce Administrator",
+        "ServiceNow Developer", "Oracle Developer",
+        "ERP Consultant", "ERP Implementation Specialist",
+        "Dynamics 365 Developer", "HubSpot Developer",
+    ],
+
+    # ═══ DESIGN & CREATIVE ═══
+    "UX / UI Design": [
+        "UX Designer", "UI Designer", "UX/UI Designer",
+        "Product Designer", "Interaction Designer", "UX Researcher",
+        "Visual Designer", "Design Systems Engineer",
+        "Service Designer", "Information Architect",
+        "UX Writer", "Design Lead", "Design Director",
+        "Figma Designer", "Prototyping Specialist",
+    ],
+    "2D Art & Illustration": [
+        "2D Artist", "Illustrator", "Digital Illustrator",
+        "Character Designer", "Background Artist",
+        "Storyboard Artist", "Comic Artist",
+        "Pixel Artist", "Icon Designer", "Pattern Designer",
+        "Key Visual Artist", "Matte Painter",
+        "Children's Book Illustrator", "Editorial Illustrator",
+        "Vector Artist", "Sprite Artist",
+    ],
+    "3D Art & Modeling": [
+        "3D Artist", "3D Modeler", "3D Animator", "3D Generalist",
+        "3D Environment Artist", "3D Character Artist",
+        "Hard Surface Modeler", "Texture Artist",
+        "Lighting Artist", "Rendering Artist",
+        "3D Visualization Artist", "Architectural Visualizer",
+        "Product Visualizer", "3D Scanning Specialist",
+    ],
+    "Game Development": [
+        "Game Developer", "Unity Developer", "Unreal Developer",
+        "Game Designer", "Level Designer", "Systems Designer",
+        "Gameplay Programmer", "Game AI Programmer",
+        "Technical Artist", "Shader Developer",
+        "Game Producer", "Narrative Designer",
+        "Game QA Tester", "Game Economy Designer",
+        "Multiplayer Engineer", "Game Tools Developer",
+        "Godot Developer",
+    ],
+    "Motion & Video": [
+        "Motion Designer", "Motion Graphics Artist",
+        "Video Editor", "Colorist", "Compositor",
+        "VFX Artist", "VFX Supervisor", "VFX Compositor",
+        "After Effects Artist", "Cinema 4D Artist",
+        "Houdini Artist", "Nuke Artist",
+        "Video Producer", "Broadcast Designer",
+        "Title Designer", "Visual Effects Producer",
+    ],
+    "Graphic Design": [
+        "Graphic Designer", "Brand Designer", "Logo Designer",
+        "Print Designer", "Packaging Designer",
+        "Publication Designer", "Layout Designer",
+        "Presentation Designer", "Infographic Designer",
+        "Environmental Graphic Designer", "Signage Designer",
+        "Creative Director", "Art Director", "Design Manager",
+    ],
+
+    # ═══ MARKETING & GROWTH ═══
+    "Digital Marketing": [
+        "Digital Marketing Manager", "Digital Marketing Specialist",
+        "Performance Marketing Manager", "Growth Marketing Manager",
+        "Marketing Automation Specialist", "Conversion Rate Optimizer",
+        "Campaign Manager", "Demand Generation Manager",
+        "Marketing Analyst", "Marketing Data Analyst",
+        "Acquisition Manager", "Retention Marketing Manager",
+        "Lifecycle Marketing Manager", "CRM Manager",
+        "Email Marketing Manager", "Email Marketing Specialist",
+        "Push Notification Manager", "Marketing Operations Manager",
+    ],
+    "SMM / Social Media": [
+        "SMM Manager", "Social Media Manager", "Social Media Specialist",
+        "Social Media Strategist", "Community Manager",
+        "Social Media Analyst", "Social Media Content Creator",
+        "Influencer Marketing Manager", "Influencer Relations Manager",
+        "TikTok Manager", "Instagram Manager", "YouTube Manager",
+        "Social Media Moderator", "Online Reputation Manager",
+        "Social Listening Analyst", "Social Media Coordinator",
+    ],
+    "Content & Copywriting": [
+        "Content Manager", "Content Strategist", "Content Director",
+        "Copywriter", "Senior Copywriter", "Creative Copywriter",
+        "UX Writer", "Technical Writer", "Content Writer",
+        "Blog Writer", "Ghostwriter", "Scriptwriter",
+        "SEO Copywriter", "Content Marketing Manager",
+        "Content Editor", "Managing Editor", "Editor-in-Chief",
+        "Brand Journalist", "Content Producer",
+        "Localization Manager", "Translation Manager",
+    ],
+    "SEO / SEM / PPC": [
+        "SEO Specialist", "SEO Manager", "SEO Analyst",
+        "SEM Specialist", "SEM Manager",
+        "PPC Specialist", "PPC Manager", "Google Ads Specialist",
+        "Paid Media Specialist", "Paid Social Specialist",
+        "Facebook Ads Manager", "Amazon Ads Specialist",
+        "Programmatic Specialist", "Media Buyer",
+        "Search Marketing Manager", "ASO Specialist",
+    ],
+    "PR & Communications": [
+        "PR Manager", "PR Specialist", "Press Officer",
+        "Communications Manager", "Communications Director",
+        "Corporate Communications Manager", "Internal Communications Manager",
+        "Public Affairs Manager", "Government Relations Manager",
+        "Media Relations Manager", "Spokesperson",
+        "Crisis Communications Manager", "Reputation Manager",
+    ],
+    "Brand & Creative Strategy": [
+        "Brand Manager", "Brand Strategist", "Brand Director",
+        "Creative Director", "Creative Strategist",
+        "Chief Marketing Officer", "VP of Marketing",
+        "Head of Brand", "Marketing Director",
+    ],
+
+    # ═══ SALES & BUSINESS DEVELOPMENT ═══
+    "B2B Sales": [
+        "B2B Sales Manager", "B2B Sales Representative",
+        "Enterprise Sales Manager", "Enterprise Account Executive",
+        "Account Executive", "Account Manager",
+        "Sales Development Representative", "SDR",
+        "Business Development Representative", "BDR",
+        "Inside Sales Representative", "Outside Sales Representative",
+        "Regional Sales Manager", "Territory Sales Manager",
+        "Channel Sales Manager", "Partner Sales Manager",
+        "Solutions Engineer", "Sales Engineer", "Pre-Sales Engineer",
+        "Key Account Manager", "Strategic Account Manager",
+        "VP of Sales", "Chief Revenue Officer", "Head of Sales",
+    ],
+    "B2C Sales & Retail": [
+        "B2C Sales Manager", "Retail Manager", "Store Manager",
+        "E-commerce Manager", "E-commerce Specialist",
+        "Online Sales Manager", "Marketplace Manager",
+        "Amazon Seller Manager", "Shopify Specialist",
+        "Sales Associate", "Sales Consultant",
+    ],
+    "Business Development": [
+        "Business Development Manager", "Business Development Director",
+        "Business Development Representative",
+        "Partnerships Manager", "Strategic Partnerships Manager",
+        "Alliance Manager", "Vendor Manager",
+        "Market Development Manager", "Growth Manager",
+        "Expansion Manager", "New Markets Manager",
+    ],
+    "Customer Success & Support": [
+        "Customer Success Manager", "Customer Success Director",
+        "Customer Experience Manager", "Client Relations Manager",
+        "Customer Support Specialist", "Customer Support Manager",
+        "Technical Support Engineer", "Help Desk Analyst",
+        "Implementation Specialist", "Onboarding Specialist",
+        "Client Solutions Manager", "Customer Advocate",
+        "Customer Operations Manager",
+    ],
+
+    # ═══ PRODUCT & PROJECT MANAGEMENT ═══
+    "Product Management": [
+        "Product Manager", "Senior Product Manager",
+        "Technical Product Manager", "AI Product Manager",
+        "Growth Product Manager", "Platform Product Manager",
+        "Product Owner", "Product Lead", "Product Director",
+        "VP of Product", "Chief Product Officer",
+        "Product Analyst", "Product Operations Manager",
+    ],
+    "Project & Program Management": [
+        "Project Manager", "Technical Project Manager",
+        "IT Project Manager", "Construction Project Manager",
+        "Program Manager", "Portfolio Manager",
+        "Scrum Master", "Agile Coach", "Agile Project Manager",
+        "Delivery Manager", "Release Manager",
+        "PMO Manager", "PMO Director",
+    ],
+    "Engineering Management": [
+        "Engineering Manager", "VP of Engineering",
+        "Director of Engineering", "CTO",
+        "Tech Lead", "Team Lead", "Staff Engineer",
+        "Principal Engineer", "Distinguished Engineer",
+        "Head of Engineering",
+    ],
+
+    # ═══ HR & PEOPLE ═══
+    "HR / People Operations": [
+        "HR Manager", "HR Specialist", "HR Generalist",
+        "HR Business Partner", "HR Director", "VP of People",
+        "Chief People Officer", "Head of HR",
+        "People Operations Manager", "HR Operations Specialist",
+        "HR Analyst", "HR Data Analyst",
+        "Employee Experience Manager", "Culture Manager",
+        "Diversity & Inclusion Manager", "DEI Specialist",
+        "Organizational Development Specialist",
+        "Change Management Specialist",
+    ],
+    "Recruitment / Talent Acquisition": [
+        "Recruiter", "Technical Recruiter", "IT Recruiter",
+        "Senior Recruiter", "Lead Recruiter",
+        "Talent Acquisition Manager", "Talent Acquisition Partner",
+        "Sourcing Specialist", "Headhunter",
+        "Recruitment Marketing Specialist", "Employer Branding Manager",
+        "Recruitment Operations Manager",
+        "Campus Recruiter", "Executive Recruiter",
+    ],
+    "Learning & Development": [
+        "L&D Manager", "Training Manager", "Training Specialist",
+        "Instructional Designer", "E-Learning Developer",
+        "Learning Experience Designer", "Knowledge Manager",
+        "Corporate Trainer", "Coaching Manager",
+        "Talent Development Manager",
+    ],
+    "Compensation & Benefits": [
+        "Compensation Analyst", "Benefits Manager",
+        "Total Rewards Manager", "Payroll Manager",
+        "Payroll Specialist", "HRIS Analyst",
+        "Workday Administrator",
+    ],
+
+    # ═══ FINANCE & ACCOUNTING ═══
+    "Finance": [
+        "Financial Analyst", "Senior Financial Analyst",
+        "FP&A Analyst", "FP&A Manager",
+        "Finance Manager", "Finance Director", "CFO",
+        "Investment Analyst", "Portfolio Manager",
+        "Risk Analyst", "Risk Manager",
+        "Treasury Analyst", "Treasury Manager",
+        "Revenue Analyst", "Pricing Analyst",
+        "Financial Controller", "Finance Business Partner",
+        "FinTech Developer", "Quantitative Developer",
+    ],
+    "Accounting": [
+        "Accountant", "Senior Accountant", "Staff Accountant",
+        "Tax Accountant", "Tax Manager",
+        "Audit Manager", "Internal Auditor", "External Auditor",
+        "Accounts Payable Specialist", "Accounts Receivable Specialist",
+        "Bookkeeper", "Billing Specialist",
+        "Accounting Manager", "Controller",
+    ],
+
+    # ═══ OPERATIONS & LOGISTICS ═══
+    "Operations": [
+        "Operations Manager", "Operations Director", "COO",
+        "Business Operations Manager", "Revenue Operations Manager",
+        "Sales Operations Manager", "Marketing Operations Manager",
+        "Operations Analyst", "Process Improvement Manager",
+        "Lean Specialist", "Six Sigma Specialist",
+    ],
+    "Supply Chain & Logistics": [
+        "Supply Chain Manager", "Supply Chain Analyst",
+        "Logistics Manager", "Logistics Coordinator",
+        "Procurement Manager", "Procurement Specialist",
+        "Sourcing Manager", "Category Manager",
+        "Inventory Manager", "Demand Planner",
+        "Warehouse Manager", "Distribution Manager",
+        "Import/Export Specialist", "Customs Specialist",
+        "Fleet Manager", "Transportation Manager",
+    ],
+
+    # ═══ LEGAL & COMPLIANCE ═══
+    "Legal & Compliance": [
+        "Legal Counsel", "Corporate Lawyer", "In-House Counsel",
+        "Legal Manager", "General Counsel",
+        "Compliance Manager", "Compliance Officer",
+        "Regulatory Affairs Manager", "Regulatory Specialist",
+        "Contract Manager", "Contract Specialist",
+        "Privacy Officer", "DPO (Data Protection Officer)",
+        "IP Lawyer", "Patent Attorney",
+        "Paralegal", "Legal Assistant",
+        "KYC Analyst", "AML Analyst",
+    ],
+
+    # ═══ CONSULTING & STRATEGY ═══
+    "Consulting & Strategy": [
+        "Management Consultant", "Strategy Consultant",
+        "Business Consultant", "IT Consultant",
+        "Digital Transformation Consultant",
+        "Technology Consultant", "SAP Consultant",
+        "Business Analyst", "Systems Analyst",
+        "Solutions Architect", "Enterprise Architect",
+        "Change Management Consultant",
+        "Process Consultant", "Lean Consultant",
+    ],
+
+    # ═══ EDUCATION & TRAINING ═══
+    "Education & EdTech": [
+        "Online Instructor", "Course Creator",
+        "Curriculum Developer", "EdTech Product Manager",
+        "LMS Administrator", "Academic Coordinator",
+        "Tutor", "Mentor", "Education Consultant",
+        "STEM Educator", "Coding Bootcamp Instructor",
+    ],
+
+    # ═══ HEALTHCARE IT ═══
+    "HealthTech / MedTech": [
+        "Health Informatics Specialist", "Clinical Data Manager",
+        "Bioinformatics Engineer", "Healthcare Data Analyst",
+        "Medical Device Engineer", "Regulatory Affairs Specialist",
+        "Telehealth Developer", "EHR Specialist",
+        "Clinical Systems Analyst", "Pharma Data Scientist",
+    ],
+
+    # ═══ MEDIA & JOURNALISM ═══
+    "Media & Journalism": [
+        "Journalist", "Reporter", "Editor",
+        "Multimedia Journalist", "Investigative Journalist",
+        "Podcast Producer", "Audio Engineer",
+        "Photographer", "Photojournalist",
+        "News Producer", "Assignment Editor",
+    ],
+
+    # ═══ ARCHITECTURE & CONSTRUCTION ═══
+    "Architecture & Construction": [
+        "Architect", "Interior Designer", "Landscape Architect",
+        "BIM Manager", "BIM Modeler",
+        "Urban Planner", "Spatial Designer",
+        "Structural Engineer", "Construction Manager",
+        "Quantity Surveyor", "Estimator",
+    ],
+
+    # ═══ REAL ESTATE ═══
+    "Real Estate & PropTech": [
+        "Real Estate Agent", "Property Manager",
+        "Real Estate Analyst", "Investment Analyst",
+        "PropTech Developer", "Leasing Manager",
+        "Asset Manager", "Facilities Manager",
+    ],
+
+    # ═══ NON-PROFIT & NGO ═══
+    "Non-Profit & NGO": [
+        "Program Manager", "Grant Writer", "Fundraiser",
+        "Volunteer Coordinator", "Community Organizer",
+        "Advocacy Manager", "Policy Analyst",
+        "Humanitarian Worker", "NGO Project Manager",
+    ],
+
+    # ═══ RESEARCH & SCIENCE ═══
+    "Research & Science": [
+        "Research Scientist", "Research Engineer",
+        "R&D Engineer", "Lab Technician",
+        "Research Analyst", "Research Associate",
+        "Computational Scientist", "Materials Scientist",
+        "Biotech Researcher", "Clinical Research Associate",
+    ],
+}
+
+
+@app.route("/suggest")
+def suggest():
+    """Return matching job role suggestions based on user input."""
+    q = request.args.get("q", "").strip().lower()
+    if len(q) < 2:
+        return jsonify([])
+
+    # Transliterate Cyrillic input for matching
+    from job_scraper.query_parser import _transliterate_tech_terms
+    q_en = _transliterate_tech_terms(q).lower()
+
+    results = []
+    seen = set()
+
+    for domain, roles in _ROLE_TAXONOMY.items():
+        for role in roles:
+            role_lower = role.lower()
+            # Match against both original and transliterated query
+            if q_en in role_lower or q in role_lower:
+                if role_lower not in seen:
+                    seen.add(role_lower)
+                    results.append({"role": role, "domain": domain})
+
+    # Also match domain names
+    for domain, roles in _ROLE_TAXONOMY.items():
+        if q_en in domain.lower() or q in domain.lower():
+            for role in roles:
+                if role.lower() not in seen:
+                    seen.add(role.lower())
+                    results.append({"role": role, "domain": domain})
+
+    return jsonify(results[:20])
 
 @app.route("/search", methods=["POST"])
 def search():
-    from flask import request
-
     data = request.get_json(force=True)
-    query_text = data.get("query", "")
-    workers = data.get("workers", 3)
+    query_text = str(data.get("query", "")).strip()
+
+    # Input validation
+    if not query_text:
+        return jsonify({"ok": False, "error": "Query cannot be empty"}), 400
+    if len(query_text) > 2000:
+        return jsonify({"ok": False, "error": "Query too long (max 2000 chars)"}), 400
+
+    try:
+        workers = int(data.get("workers", 3))
+    except (TypeError, ValueError):
+        workers = 3
+    workers = max(1, min(10, workers))
 
     parsed = parse_query(query_text)
-    parsed.workers = max(1, min(10, workers))
+    parsed.workers = workers
 
-    _reset_state()
-    _set_status("running")
+    task_id = str(uuid.uuid4())
+    _init_task(task_id)
 
     # Return parsed info immediately, scraping runs in background
     thread = threading.Thread(
         target=_run_scraper_background,
-        args=(parsed,),
+        args=(parsed, task_id),
         daemon=True,
     )
     thread.start()
 
     return jsonify({
         "ok": True,
+        "task_id": task_id,
         "parsed": {
             "job_title": parsed.job_title,
             "count": parsed.count,
@@ -563,10 +587,25 @@ def search():
     })
 
 
+@app.route("/cancel", methods=["POST"])
+def cancel():
+    data = request.get_json(force=True)
+    task_id = data.get("task_id")
+    if task_id:
+        _cancel_flags.add(task_id)
+        _set_status(task_id, "error", error="Cancelled by user")
+    return jsonify({"ok": True})
+
 @app.route("/status")
 def status():
+    task_id = request.args.get("task_id")
     with _state_lock:
-        return jsonify(dict(_state))
+        if not task_id or task_id not in _state_dict:
+            return jsonify({"status": "error", "error": "Invalid task ID"})
+        
+        resp = dict(_state_dict[task_id])
+        resp["progress"] = list(_logs_dict.get(task_id, []))
+        return jsonify(resp)
 
 
 @app.route("/results")
@@ -577,7 +616,11 @@ def results():
     if not csv_path.exists():
         return jsonify([])
 
-    df = pd.read_csv(csv_path)
+    try:
+        df = pd.read_csv(csv_path)
+    except pd.errors.EmptyDataError:
+        return jsonify([])
+
     cols = ["company", "position", "location", "url", "description"]
     for c in cols:
         if c not in df.columns:
@@ -591,17 +634,34 @@ def results():
 def analytics():
     import pandas as pd
     import re
+    from collections import Counter
     
     csv_path = config.FINAL_CSV
     if not csv_path.exists():
         return jsonify({})
         
-    df = pd.read_csv(csv_path)
+    try:
+        df = pd.read_csv(csv_path)
+    except pd.errors.EmptyDataError:
+        return jsonify({"total_jobs": 0})
+
     if df.empty:
         return jsonify({"total_jobs": 0})
         
-    loc_counts = df['location'].value_counts().head(5).to_dict()
-    comp_counts = df['company'].value_counts().head(5).to_dict()
+    loc_counts = df['location'].value_counts().head(7).to_dict()
+    comp_counts = df['company'].value_counts().head(7).to_dict()
+    
+    sources_raw = df.get('source', pd.Series(dtype=str)).value_counts().to_dict()
+    sources = {}
+    for k, v in sources_raw.items():
+        k_str = str(k)
+        # Proper capitalization for known sites
+        if k_str.lower() == 'linkedin': sources['LinkedIn'] = v
+        elif k_str.lower() == 'indeed': sources['Indeed'] = v
+        elif k_str.lower() == 'glassdoor': sources['Glassdoor'] = v
+        elif k_str.lower() == 'zip_recruiter': sources['ZipRecruiter'] = v
+        else: sources[k_str.capitalize()] = v
+    if not sources: sources = {"LinkedIn": len(df)}
     
     salaries = []
     if 'min_amount' in df.columns and 'max_amount' in df.columns:
@@ -611,24 +671,26 @@ def analytics():
                 mx = float(row.get('max_amount'))
                 if pd.notna(mn) and pd.notna(mx) and mn > 0:
                     salaries.append((mn + mx) / 2)
-            except:
+            except (TypeError, ValueError):
                 pass
                 
     if len(salaries) < 5:
         for desc in df['description'].dropna():
             matches = re.findall(r'[\$€£]\s*(\d{2,3})[kK]', str(desc))
-            for m in matches:
+            for match in matches:
                 try:
-                    val = float(m) * 1000
-                    if 20000 <= val <= 300000: salaries.append(val)
-                except:
+                    val = float(match) * 1000
+                    if 20000 <= val <= 300000:
+                        salaries.append(val)
+                except (TypeError, ValueError):
                     pass
             matches = re.findall(r'[\$€£]\s*(\d{2,3}),(\d{3})', str(desc))
-            for m1, m2 in matches:
+            for amount_k, amount_rest in matches:
                 try:
-                    val = float(m1 + m2)
-                    if 20000 <= val <= 300000: salaries.append(val)
-                except:
+                    val = float(amount_k + amount_rest)
+                    if 20000 <= val <= 300000:
+                        salaries.append(val)
+                except (TypeError, ValueError):
                     pass
 
     salary_bins = {"< $50k": 0, "$50k-$100k": 0, "$100k-$150k": 0, "> $150k": 0}
@@ -640,10 +702,45 @@ def analytics():
         elif s < 150000: salary_bins["$100k-$150k"] += 1
         else: salary_bins["> $150k"] += 1
         
+    exp_bins = {"Junior": 0, "Mid-Level": 0, "Senior": 0, "Lead/Principal": 0}
+    for title in df['position'].dropna():
+        t = title.lower()
+        if 'junior' in t or 'jr' in t: exp_bins["Junior"] += 1
+        elif 'senior' in t or 'sr' in t: exp_bins["Senior"] += 1
+        elif 'lead' in t or 'principal' in t or 'head' in t or 'director' in t: exp_bins["Lead/Principal"] += 1
+        else: exp_bins["Mid-Level"] += 1
+    exp_bins = {k: v for k, v in exp_bins.items() if v > 0}
+    
+    work_bins = {"Remote": 0, "Hybrid": 0, "On-site": 0}
+    for _, row in df.iterrows():
+        pos = str(row.get('position', '')).lower()
+        loc = str(row.get('location', '')).lower()
+        desc_text = str(row.get('description', '')).lower()
+        if 'remote' in pos or 'remote' in loc or 'remote' in desc_text:
+            work_bins["Remote"] += 1
+        elif 'hybrid' in pos or 'hybrid' in loc or 'hybrid' in desc_text:
+            work_bins["Hybrid"] += 1
+        else:
+            work_bins["On-site"] += 1
+    work_bins = {k: v for k, v in work_bins.items() if v > 0}
+
+    TECH_WORDS = set(config.TECH_WORDS)
+    kw_counter = Counter()
+    for desc in df['description'].dropna():
+        words = set(re.findall(r'\b[a-z0-9+#]{2,15}\b', str(desc).lower()))
+        for w in words:
+            if w in TECH_WORDS:
+                kw_counter[w] += 1
+    top_keywords = {k.capitalize(): v for k, v in kw_counter.most_common(7)}
+
     return jsonify({
         "locations": loc_counts,
         "companies": comp_counts,
         "salaries": salary_bins if has_salaries else None,
+        "experience": exp_bins,
+        "work_type": work_bins,
+        "keywords": top_keywords,
+        "sources": sources,
         "total_jobs": len(df)
     })
 
@@ -656,35 +753,40 @@ def download():
     return send_file(str(csv_path), as_attachment=True, download_name="jobs.csv")
 
 
-def _run_scraper_background(parsed):
+def _run_scraper_background(parsed, task_id):
     """Run the scraper in a background thread with progress tracking."""
-    import builtins
-    original_print = builtins.print
+    # Setup logger for this task
+    logger = setup_task_logger(task_id, _logs_dict)
 
-    def patched_print(*args, **kwargs):
-        msg = " ".join(str(a) for a in args)
-        _add_progress(msg)
-        original_print(*args, **kwargs)
-
-    builtins.print = patched_print
+    def is_cancelled():
+        return task_id in _cancel_flags
 
     try:
-        run_scraper(parsed)
-        process_jobs(parsed)
+        run_scraper(parsed, task_id=task_id, cancel_check=is_cancelled)
+        
+        if is_cancelled():
+            logger.info("Process cancelled by user.")
+            return
+
+        process_jobs(parsed, task_id=task_id)
+
+        if is_cancelled():
+            return
 
         # Count results
         import pandas as pd
+        count = 0
         if config.FINAL_CSV.exists():
-            count = len(pd.read_csv(config.FINAL_CSV))
-        else:
-            count = 0
+            try:
+                count = len(pd.read_csv(config.FINAL_CSV))
+            except pd.errors.EmptyDataError:
+                count = 0
 
-        _set_status("done", result_count=count)
+        _set_status(task_id, "done", result_count=count)
 
     except Exception as e:
-        _set_status("error", error=str(e))
-    finally:
-        builtins.print = original_print
+        logger.error(f"Failed with error: {str(e)}")
+        _set_status(task_id, "error", error=str(e))
 
 
 def start_ui(port: int = 8080, no_browser: bool = False):
@@ -699,4 +801,4 @@ def start_ui(port: int = 8080, no_browser: bool = False):
     if not no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="127.0.0.1", port=port, debug=False)
