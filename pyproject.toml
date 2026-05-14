@@ -13,6 +13,10 @@ dependencies = [
     "python-jobspy>=1.1",
     "rapidfuzz>=3.14.5",
     "tqdm>=4.60",
+    "duckduckgo-search>=6.0.0",
+    "ddgs>=9.14.2",
+    "beautifulsoup4>=4.12.0",
+    "requests>=2.31.0",
 ]
 
 [project.scripts]

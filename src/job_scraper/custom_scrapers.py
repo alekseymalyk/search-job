@@ -2,11 +2,16 @@ import logging
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
-import time
-import random
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+try:
+    from duckduckgo_search import DDGS
+    HAS_DDG = True
+except ImportError:
+    HAS_DDG = False
+    logger.warning("duckduckgo_search not installed. Search-based fallback will be disabled.")
 
 def _get_headers():
     return {
@@ -52,8 +57,6 @@ def scrape_hitmarker(query: str, location: str = "") -> pd.DataFrame:
         resp = requests.get(search_url, headers=_get_headers(), timeout=15)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # Hitmarker specific: search for job cards
-            # Based on subagent, they use links with /jobs/
             links = soup.find_all('a', href=True)
             for link in links:
                 href = link['href']
@@ -77,14 +80,12 @@ def scrape_hitmarker(query: str, location: str = "") -> pd.DataFrame:
 
 def scrape_gamejobs(query: str, location: str = "") -> pd.DataFrame:
     """Direct scraper for GameJobs.work"""
-    # Note: URL might need a different structure, but let's try direct search
     search_url = f"https://gamejobs.work/search?q={query.replace(' ', '+')}"
     jobs = []
     try:
         resp = requests.get(search_url, headers=_get_headers(), timeout=15)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # Selectors from subagent
             cards = soup.select('a[href^="/job/"]')
             for card in cards:
                 title = card.select_one('.position')
@@ -114,7 +115,6 @@ def scrape_animatedjobs(query: str, location: str = "") -> pd.DataFrame:
         resp = requests.get(search_url, headers=_get_headers(), timeout=15)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # Standard WordPress/JobBoard structure
             posts = soup.select('article, .job_listing, .post')
             for post in posts:
                 title_link = post.select_one('h1 a, h2 a, h3 a, .entry-title a')
@@ -136,6 +136,9 @@ def scrape_animatedjobs(query: str, location: str = "") -> pd.DataFrame:
 
 def scrape_via_search_engine(site_domain: str, query: str, location: str = "") -> pd.DataFrame:
     """Universal fallback via DDG"""
+    if not HAS_DDG:
+        return pd.DataFrame()
+        
     search_query = f"site:{site_domain} {query} {location}".strip()
     jobs = []
     try:
