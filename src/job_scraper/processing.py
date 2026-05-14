@@ -182,6 +182,15 @@ def process_jobs(parsed: ParsedQuery = None, task_id: str = None) -> None:
     # 1. Hard Reject Filter
     logger.info("  ▸ Stage: Filtering & Sponsor check...")
     
+    mask_keep = pd.Series(True, index=jobs.index)
+    reject_counts = Counter()
+    rejection_samples = {}  # {reason: [ (title, company) ]}
+
+    def add_sample(reason, row):
+        if reason not in rejection_samples: rejection_samples[reason] = []
+        if len(rejection_samples[reason]) < 3:
+            rejection_samples[reason].append(f'"{row.get("position","")}" at {row.get("company","")}')
+
     sponsor_map = {}  # {normalized_name: raw_name}
     if Path(config.SPONSORS_CSV).exists():
         try:
@@ -199,7 +208,6 @@ def process_jobs(parsed: ParsedQuery = None, task_id: str = None) -> None:
     def contains_any_re(patterns):
         if not patterns: return None
         escaped = [re.escape(p) for p in patterns]
-        # Use non-capturing group (?:...) to avoid pandas UserWarning
         return re.compile("(?i)(?:" + "|".join(escaped) + ")")
 
     title_block_re = contains_any_re(config.TITLE_BLOCK_PATTERNS)
@@ -207,54 +215,58 @@ def process_jobs(parsed: ParsedQuery = None, task_id: str = None) -> None:
     loc_block_re = contains_any_re(config.LOCATION_BLOCK_PATTERNS)
     desc_block_re = contains_any_re(config.DESC_BLOCK_PATTERNS)
 
-    reject_counts = Counter()
-
-    # Vectorized fast filters
-    mask_keep = pd.Series(True, index=jobs.index)
-    
     if config.REQUIRE_NONEMPTY_DESCRIPTION:
         empty_mask = jobs["description"].str.strip() == ""
+        for idx in jobs[empty_mask].index: add_sample("desc_empty", jobs.loc[idx])
         reject_counts["desc_empty"] += empty_mask.sum()
         mask_keep &= ~empty_mask
 
     if title_block_re:
         tb_mask = jobs["position"].str.contains(title_block_re.pattern, regex=True, flags=re.IGNORECASE)
+        for idx in jobs[tb_mask].index: add_sample("title_block", jobs.loc[idx])
         reject_counts["title_block"] += tb_mask.sum()
         mask_keep &= ~tb_mask
 
     for abl_re in all_block_lists_re:
         if abl_re:
             abl_mask = jobs["position"].str.contains(abl_re.pattern, regex=True, flags=re.IGNORECASE)
+            for idx in jobs[abl_mask].index: add_sample("title_non_business", jobs.loc[idx])
             reject_counts["title_non_business"] += abl_mask.sum()
             mask_keep &= ~abl_mask
 
     if loc_block_re:
         lb_mask = jobs["location"].str.contains(loc_block_re.pattern, regex=True, flags=re.IGNORECASE)
+        for idx in jobs[lb_mask].index: add_sample("location_block", jobs.loc[idx])
         reject_counts["location_block"] += lb_mask.sum()
         mask_keep &= ~lb_mask
 
     if desc_block_re:
         db_mask = jobs["description"].str.contains(desc_block_re.pattern, regex=True, flags=re.IGNORECASE)
+        for idx in jobs[db_mask].index: add_sample("desc_block", jobs.loc[idx])
         reject_counts["desc_block"] += db_mask.sum()
         mask_keep &= ~db_mask
 
-    # Strict title/remote filters
+    # Job Title Relevance (Loosened - only reject if 0 overlap)
     if parsed and parsed.job_title:
         expected_tokens = set(tokenize(parsed.job_title))
         if expected_tokens:
             def match_title(title):
                 return bool(expected_tokens & set(tokenize(title)))
             title_match_mask = jobs["position"].apply(match_title)
+            for idx in jobs[~title_match_mask].index: add_sample("irrelevant_title", jobs.loc[idx])
             reject_counts["irrelevant_title"] += (~title_match_mask).sum()
             mask_keep &= title_match_mask
 
     if parsed and parsed.remote:
-        not_remote_mask = (
-            jobs["location"].str.lower().str.contains(r"on-site|onsite|hybrid", regex=True) |
-            jobs["position"].str.lower().str.contains(r"on-site|hybrid", regex=True)
-        )
-        reject_counts["not_remote"] += not_remote_mask.sum()
-        mask_keep &= ~not_remote_mask
+        # Check remote in all key fields
+        def is_remote_check(row):
+            text = f'{row.get("position","")} {row.get("location","")} {row.get("description","")}'.lower()
+            return any(m in text for m in ["remote", "віддален", "удалён", "удален", "дистанц"])
+        
+        remote_mask = jobs.apply(is_remote_check, axis=1)
+        for idx in jobs[~remote_mask].index: add_sample("not_remote", jobs.loc[idx])
+        reject_counts["not_remote"] += (~remote_mask).sum()
+        mask_keep &= remote_mask
 
     # Experience Level check
     is_junior_search = False
@@ -265,6 +277,7 @@ def process_jobs(parsed: ParsedQuery = None, task_id: str = None) -> None:
             
     if is_junior_search:
         exp_mask = jobs["description"].apply(requires_2plus_years)
+        for idx in jobs[exp_mask].index: add_sample("exp_too_high", jobs.loc[idx])
         reject_counts["exp_too_high"] += exp_mask.sum()
         mask_keep &= ~exp_mask
 
@@ -299,13 +312,16 @@ def process_jobs(parsed: ParsedQuery = None, task_id: str = None) -> None:
         
         if sponsor_map:
             sponsor_miss_mask = df["sponsor_score"] < config.SPONSOR_MATCH_THRESHOLD
+            for idx in df[sponsor_miss_mask].index: add_sample("sponsor_miss", df.loc[idx])
             reject_counts["sponsor_miss"] += sponsor_miss_mask.sum()
             df = df[~sponsor_miss_mask].copy()
 
     logger.info("Rejections:")
     for reason, count in reject_counts.most_common():
         if count > 0:
-            logger.info(f"  {reason}: {count}")
+            samples = rejection_samples.get(reason, [])
+            sample_str = f" (e.g. {', '.join(samples)})" if samples else ""
+            logger.info(f"  {reason}: {count}{sample_str}")
 
     if df.empty:
         pd.DataFrame().to_csv(config.FINAL_CSV, index=False)

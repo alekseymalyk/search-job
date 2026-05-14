@@ -72,8 +72,7 @@ DESC_BLOCK_PATTERNS = _custom_config.get("desc_block_patterns", [
     "traineeship", "internship", "bedrijf", "vergelijkbare", "leuk", "afgeronde",
     "ontwikkeling", "bieden", "minimaal", "houdt", "ontdekken", "voorbereid",
     "ben j", "aufgaben", "werken", "zakelijk", "EU citizenship",
-    "inimum 3", "inimum 4", "inimum 5", "inimum 6", "inimum 7", "inimum 8",
-    "für", "jij", "Tu es", "3-5", "Une", "-10", "5+",
+    "für", "jij", "Tu es", "Une",
     "Dutch and English", "English and Dutch",
 ])
 
