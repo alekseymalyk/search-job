@@ -53,6 +53,7 @@ def scrape_hitmarker(query: str, location: str = "") -> pd.DataFrame:
     """Direct scraper for Hitmarker.net"""
     search_url = f"https://hitmarker.net/jobs?keyword={query.replace(' ', '+')}"
     jobs = []
+    seen_urls = set()
     try:
         resp = requests.get(search_url, headers=_get_headers(), timeout=15)
         if resp.status_code == 200:
@@ -61,16 +62,38 @@ def scrape_hitmarker(query: str, location: str = "") -> pd.DataFrame:
             for link in links:
                 href = link['href']
                 if '/jobs/' in href and len(href.split('/')) > 2:
-                    title = link.text.strip()
-                    if title and len(title) > 5 and not any(x in title.lower() for x in ['sign in', 'cookie', 'privacy']):
-                        jobs.append({
-                            "company": "Hitmarker Employer",
-                            "position": title,
-                            "location": location or "Remote",
-                            "url": href if href.startswith('http') else f"https://hitmarker.net{href}",
-                            "description": "",
-                            "source": "hitmarker"
-                        })
+                    import re
+                    raw_text = link.get_text(separator=' ', strip=True)
+                    # Strip emoji and excessive whitespace
+                    title = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26FF\u2700-\u27BF]', '', raw_text)
+                    title = re.sub(r'\s+', ' ', title).strip()
+                    if not title or len(title) < 5:
+                        continue
+                    if any(x in title.lower() for x in ['sign in', 'cookie', 'privacy', 'hitmarker']):
+                        continue
+                    # Canonical URL for dedup (strip location query params)
+                    canonical = href if href.startswith('http') else f"https://hitmarker.net{href}"
+                    canonical = canonical.split('?')[0]  # strip query params
+                    if canonical in seen_urls:
+                        continue
+                    seen_urls.add(canonical)
+                    # Try to extract company name from parent card element
+                    card = link.find_parent(lambda tag: tag.name in ('article', 'div', 'li') and tag.get('class'))
+                    company = "Unknown"
+                    if card:
+                        for cls in ['company', 'employer', 'studio', 'organization']:
+                            comp_tag = card.find(class_=lambda c: c and cls in c.lower())
+                            if comp_tag:
+                                company = comp_tag.get_text(strip=True)
+                                break
+                    jobs.append({
+                        "company": company,
+                        "position": title,
+                        "location": "Remote",
+                        "url": canonical,
+                        "description": "",
+                        "source": "hitmarker"
+                    })
     except Exception as e:
         logger.warning(f"Hitmarker direct scrape failed: {e}")
 

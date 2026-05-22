@@ -77,31 +77,46 @@ def slugify(s: str) -> str:
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename provider-specific columns to a unified schema."""
+    """Rename provider-specific columns to a unified schema.
+    
+    Handles the case where JobSpy raw DataFrames use 'job_url', 'title', 'site',
+    'company_name' while custom scrapers already use 'url', 'position', 'source', 'company'.
+    We merge values: if destination column already exists but is empty/NaN for a row,
+    fill it from the source column.
+    """
     if df is None or len(df) == 0:
         return pd.DataFrame(columns=["company", "position", "location", "url", "description", "source"])
 
     df = df.copy()
-    rename_map = {}
-    taken = set(df.columns)
 
-    def _try_rename(src: str, dst: str) -> None:
-        if src in df.columns and dst not in taken:
-            rename_map[src] = dst
-            taken.add(dst)
+    # Mapping: source_col -> dest_col (merge strategy: fill NaN in dest from src)
+    merge_map = [
+        ("title",           "position"),
+        ("job_url",         "url"),
+        ("job_url_direct",  "url"),
+        ("company_name",    "company"),
+        ("job_location",    "location"),
+        ("job_description", "description"),
+        ("site",            "source"),
+        ("job_board",       "source"),
+    ]
 
-    _try_rename("title", "position")
-    _try_rename("job_url", "url")
-    _try_rename("job_url_direct", "url")
-    _try_rename("company_name", "company")
-    _try_rename("job_location", "location")
-    _try_rename("job_description", "description")
-    _try_rename("site", "source")
-    _try_rename("job_board", "source")
+    for src, dst in merge_map:
+        if src not in df.columns:
+            continue
+        if dst not in df.columns:
+            # Simple rename
+            df = df.rename(columns={src: dst})
+        else:
+            # Merge: fill empty dst cells from src, then drop src
+            dst_empty = df[dst].isna() | (df[dst].astype(str).str.strip().isin(["", "nan", "None", "none"]))
+            df.loc[dst_empty, dst] = df.loc[dst_empty, src]
+            df = df.drop(columns=[src])
 
-    df = df.rename(columns=rename_map)
+    # Deduplicate columns if any remain
     df = df.loc[:, ~df.columns.duplicated()]
 
+    # Ensure all required columns exist
     for col in ["company", "position", "location", "url", "description", "source"]:
         if col not in df.columns:
             df[col] = ""

@@ -1,0 +1,63 @@
+{
+  "require_nonempty_description": false,
+  "title_block_patterns": [
+    "intern",
+    "internship",
+    "trainee",
+    "traineeship",
+    "part-time",
+    "part time"
+  ],
+  "desc_block_patterns": [],
+  "location_block_patterns": [],
+  "low_skill_title_patterns": [
+    "barista",
+    "waiter",
+    "waitress",
+    "cashier",
+    "dishwasher",
+    "courier",
+    "delivery driver",
+    "warehouse worker",
+    "order picker",
+    "forklift"
+  ],
+  "non_business_patterns": [],
+  "title_boosts": {
+    "hard surface": 3.0,
+    "hard-surface": 3.0,
+    "3d artist": 3.0,
+    "environment artist": 2.5,
+    "prop artist": 2.5,
+    "vehicle artist": 2.5,
+    "technical artist": 2.0,
+    "level artist": 2.0,
+    "character artist": 1.5,
+    "blender": 1.0,
+    "substance": 1.0,
+    "unreal": 1.0,
+    "unity": 1.0,
+    "game artist": 2.0
+  },
+  "desc_boosts": {
+    "blender": 1.0,
+    "substance painter": 1.5,
+    "marmoset": 1.0,
+    "pbr": 1.0,
+    "hard surface": 2.0,
+    "hard-surface": 2.0,
+    "retopology": 1.5,
+    "uv unwrap": 1.0,
+    "baking": 0.5,
+    "unreal engine": 1.0,
+    "unity": 0.5,
+    "polycount": 1.0,
+    "lod": 0.5,
+    "game-ready": 1.0,
+    "game ready": 1.0
+  },
+  "enable_ai_enrichment": false,
+  "enable_ai_query_parsing": true,
+  "ai_max_jobs": 20,
+  "openai_model": "gpt-4o-mini"
+}
